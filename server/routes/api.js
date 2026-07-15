@@ -105,16 +105,14 @@ router.delete('/pages/:id', (req, res) => {
 });
 
 /**
- * Pull the last N days of conversation history for one connected fanpage
- * from Meta's Conversations API (separate from the webhook, which only
- * streams NEW messages going forward). Text only for now — attachments in
- * old history are noted as a placeholder rather than re-downloaded.
+ * Pull the last N days of conversation history for one connected fanpage from Meta's
+ * Conversations API. Used both by the manual "Đồng bộ 30 ngày" button AND by the automatic
+ * background poll (see startAutoSync below) — the background poll is what lets messages show
+ * up without staff having to click Sync, in place of the live webhook (which needs Meta App
+ * Review / pages_messaging Advanced Access to deliver events from real customers — see the
+ * "Hoàn tất quy trình Xét duyệt ứng dụng" notice in Meta's dashboard).
  */
-router.post('/pages/:id/sync-history', async (req, res) => {
-  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
-  if (!page) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
-
-  const days = Math.min(Math.max(parseInt(req.body?.days, 10) || 30, 1), 365);
+async function syncPageHistory(page, days) {
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
   // Upsert (not insert-or-ignore) so that re-running a sync also retroactively fixes messages
@@ -132,79 +130,119 @@ router.post('/pages/:id/sync-history', async (req, res) => {
   let conversationsTouched = 0;
   let messagesImported = 0;
 
-  try {
-    const history = await fetchConversationHistory(page.access_token, sinceMs);
+  const history = await fetchConversationHistory(page.access_token, sinceMs);
 
-    for (const conv of history) {
-      const participants = conv.participants?.data || [];
-      const customer = participants.find((p) => p.id !== page.page_id);
-      if (!customer) continue;
-      const psid = customer.id;
-      const customerName = customer.name || `Khách hàng #${psid.slice(-5)}`;
+  for (const conv of history) {
+    const participants = conv.participants?.data || [];
+    const customer = participants.find((p) => p.id !== page.page_id);
+    if (!customer) continue;
+    const psid = customer.id;
+    const customerName = customer.name || `Khách hàng #${psid.slice(-5)}`;
 
-      const msgs = (conv.messages?.data || [])
-        .filter((m) => m.created_time && new Date(m.created_time).getTime() >= sinceMs)
-        .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
-      if (!msgs.length) continue;
+    const msgs = (conv.messages?.data || [])
+      .filter((m) => m.created_time && new Date(m.created_time).getTime() >= sinceMs)
+      .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+    if (!msgs.length) continue;
 
-      let row = db.prepare('SELECT * FROM conversations WHERE page_row_id = ? AND customer_psid = ?').get(page.id, psid);
-      const isNewRow = !row;
-      if (!row) {
-        const info = db
-          .prepare(`INSERT INTO conversations (page_row_id, customer_psid, customer_name, last_message_preview, unread_count) VALUES (?, ?, ?, '', 0)`)
-          .run(page.id, psid, customerName);
-        row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+    let row = db.prepare('SELECT * FROM conversations WHERE page_row_id = ? AND customer_psid = ?').get(page.id, psid);
+    const isNewRow = !row;
+    if (!row) {
+      const info = db
+        .prepare(`INSERT INTO conversations (page_row_id, customer_psid, customer_name, last_message_preview, unread_count) VALUES (?, ?, ?, '', 0)`)
+        .run(page.id, psid, customerName);
+      row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+    }
+
+    let importedForThisConv = 0;
+    let newInboundForThisConv = 0; // customer messages actually new this run — drives the unread badge
+    for (const m of msgs) {
+      const direction = m.from?.id === page.page_id ? 'out' : 'in';
+      const attachmentsData = m.attachments?.data || [];
+      const firstAtt = attachmentsData[0];
+      let attachment_url = null;
+      let attachment_type = null;
+      if (firstAtt && firstAtt.file_url) {
+        attachment_url = firstAtt.file_url;
+        const mime = firstAtt.mime_type || '';
+        attachment_type = mime.startsWith('image') ? 'image' : mime.startsWith('video') ? 'video' : 'file';
       }
-
-      let importedForThisConv = 0;
-      for (const m of msgs) {
-        const direction = m.from?.id === page.page_id ? 'out' : 'in';
-        const attachmentsData = m.attachments?.data || [];
-        const firstAtt = attachmentsData[0];
-        let attachment_url = null;
-        let attachment_type = null;
-        if (firstAtt && firstAtt.file_url) {
-          attachment_url = firstAtt.file_url;
-          const mime = firstAtt.mime_type || '';
-          attachment_type = mime.startsWith('image') ? 'image' : mime.startsWith('video') ? 'video' : 'file';
-        }
-        let text = m.message || '';
-        if (!text && !attachment_url && attachmentsData.length) {
-          // Had an attachment but Facebook didn't give us a usable URL for it (e.g. an
-          // unsupported/expired type) — keep a placeholder so the message isn't silently dropped.
-          text = '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]';
-        }
-        if (!text && !attachment_url) continue;
-        const info = upsertMsg.run(row.id, direction, text, attachment_url, attachment_type, m.id, m.created_time);
-        if (info.changes > 0) { messagesImported++; importedForThisConv++; }
+      let text = m.message || '';
+      if (!text && !attachment_url && attachmentsData.length) {
+        // Had an attachment but Facebook didn't give us a usable URL for it (e.g. an
+        // unsupported/expired type) — keep a placeholder so the message isn't silently dropped.
+        text = '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]';
       }
-
-      if (importedForThisConv > 0) {
-        const latest = msgs[msgs.length - 1];
-        const preview = (latest.message || '[Tệp đính kèm]').slice(0, 140);
-        const latestAt = new Date(latest.created_time).toISOString().replace('T', ' ').replace(/\..+/, '');
-        // A brand-new row's last_message_at still holds its INSERT-time default ("now"), which is
-        // always more recent than any historical message being imported — so MAX(last_message_at, ?)
-        // would always keep "now" instead of the real message time. Only rows that already existed
-        // before this sync (e.g. touched by a live webhook message since) should use MAX, to avoid
-        // regressing a legitimately newer timestamp backward.
-        if (isNewRow) {
-          db.prepare('UPDATE conversations SET last_message_preview = ?, last_message_at = ? WHERE id = ?').run(preview, latestAt, row.id);
-        } else {
-          db.prepare(
-            `UPDATE conversations SET last_message_preview = ?, last_message_at = MAX(last_message_at, ?) WHERE id = ?`
-          ).run(preview, latestAt, row.id);
-        }
-        conversationsTouched++;
+      if (!text && !attachment_url) continue;
+      const info = upsertMsg.run(row.id, direction, text, attachment_url, attachment_type, m.id, m.created_time);
+      if (info.changes > 0) {
+        messagesImported++;
+        importedForThisConv++;
+        if (direction === 'in') newInboundForThisConv++;
       }
     }
 
+    if (importedForThisConv > 0) {
+      const latest = msgs[msgs.length - 1];
+      const preview = (latest.message || '[Tệp đính kèm]').slice(0, 140);
+      const latestAt = new Date(latest.created_time).toISOString().replace('T', ' ').replace(/\..+/, '');
+      // A brand-new row's last_message_at still holds its INSERT-time default ("now"), which is
+      // always more recent than any historical message being imported — so MAX(last_message_at, ?)
+      // would always keep "now" instead of the real message time. Only rows that already existed
+      // before this sync (e.g. touched by a live webhook message since) should use MAX, to avoid
+      // regressing a legitimately newer timestamp backward.
+      if (isNewRow) {
+        db.prepare('UPDATE conversations SET last_message_preview = ?, last_message_at = ?, unread_count = unread_count + ? WHERE id = ?')
+          .run(preview, latestAt, newInboundForThisConv, row.id);
+      } else {
+        db.prepare(
+          `UPDATE conversations SET last_message_preview = ?, last_message_at = MAX(last_message_at, ?), unread_count = unread_count + ? WHERE id = ?`
+        ).run(preview, latestAt, newInboundForThisConv, row.id);
+      }
+      conversationsTouched++;
+    }
+  }
+
+  return { conversationsTouched, messagesImported };
+}
+
+router.post('/pages/:id/sync-history', async (req, res) => {
+  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
+  if (!page) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
+
+  const days = Math.min(Math.max(parseInt(req.body?.days, 10) || 30, 1), 365);
+  try {
+    const { conversationsTouched, messagesImported } = await syncPageHistory(page, days);
     res.json({ ok: true, days, conversations: conversationsTouched, messages_imported: messagesImported });
   } catch (e) {
     console.error('sync-history error', e);
     res.status(500).json({ error: e.message || 'Đồng bộ lịch sử thất bại' });
   }
 });
+
+// ---- Automatic background sync (stands in for the live webhook until Meta App Review is done) ----
+// Polls every connected Facebook page's last 2 days of conversations on a timer, so new customer
+// messages show up within a few minutes without staff needing to click "Đồng bộ 30 ngày" manually.
+// A short window (2 days, not 30) keeps each poll cheap — Graph API calls scale with how many
+// conversations were recently updated, not with the window length itself, but a short window means
+// long-idle conversations aren't re-fetched every cycle for no reason.
+let autoSyncTimer = null;
+async function autoSyncTick() {
+  const pages = db.prepare("SELECT * FROM pages WHERE channel = 'facebook' AND active = 1 AND access_token != ''").all();
+  for (const page of pages) {
+    try {
+      await syncPageHistory(page, 2);
+    } catch (e) {
+      console.error(`auto-sync failed for page "${page.name}":`, e.message);
+    }
+  }
+}
+function startAutoSync(intervalMs = 3 * 60 * 1000) {
+  if (autoSyncTimer) return; // don't double-start (e.g. on hot reload)
+  autoSyncTimer = setInterval(autoSyncTick, intervalMs);
+  autoSyncTick().catch((e) => console.error('auto-sync initial tick failed:', e.message));
+  const label = intervalMs >= 60000 ? `${Math.round(intervalMs / 60000)} phút` : `${Math.round(intervalMs / 1000)} giây`;
+  console.log(`Đã bật tự động đồng bộ tin nhắn mới mỗi ${label} (thay cho webhook trong lúc chờ Meta duyệt).`);
+}
 
 /**
  * Backfill the real Facebook avatar for every conversation on this page that doesn't have one
@@ -412,3 +450,4 @@ router.get('/stats', (req, res) => {
 });
 
 module.exports = router;
+module.exports.startAutoSync = startAutoSync;
