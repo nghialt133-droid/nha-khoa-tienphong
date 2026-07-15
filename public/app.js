@@ -221,6 +221,15 @@ function initials(name) {
   return (name || '?').trim().split(/\s+/).slice(-2).map((w) => w[0]).join('').toUpperCase();
 }
 
+/** Avatar circle: real Facebook profile photo as a CSS background if we have one (silently falls
+ * back to a blank colored circle if the image URL fails to load — never an ugly broken-image icon),
+ * otherwise the customer's initials as text. */
+function avatarAttrs(name, avatarUrl) {
+  const style = avatarUrl ? ` style="background-image:url('${escapeHtml(avatarUrl)}');background-size:cover;background-position:center;"` : '';
+  const text = avatarUrl ? '' : initials(name);
+  return { style, text };
+}
+
 function renderConvList() {
   const scroll = $('#convScroll');
   if (conversations.length === 0) {
@@ -231,8 +240,9 @@ function renderConvList() {
   scroll.innerHTML = '';
   conversations.forEach((c) => {
     const item = el('div', { class: `conv-item ${c.id === activeConvId ? 'active' : ''}`, 'data-id': c.id });
+    const av = avatarAttrs(c.customer_name, c.customer_avatar_url);
     item.innerHTML = `
-      <div class="avatar">${initials(c.customer_name)}</div>
+      <div class="avatar"${av.style}>${av.text}</div>
       <div class="conv-body">
         <div class="conv-top">
           <span class="conv-name">${c.page && c.page.channel === 'website' ? '🌐 ' : ''}${escapeHtml(c.customer_name)}</span>
@@ -282,11 +292,12 @@ function renderThread(conv) {
   lastMsgCount = conv.messages.length;
   pendingAttachment = null;
   const isWebsite = !!(conv.page && conv.page.channel === 'website');
+  const threadAv = avatarAttrs(conv.customer_name, conv.customer_avatar_url);
   const panel = $('#threadPanel');
   panel.innerHTML = `
     <div class="thread-header">
       <button class="icon-btn mobile-only back-btn" id="backToListBtn">← Danh sách</button>
-      <div class="avatar">${initials(conv.customer_name)}</div>
+      <div class="avatar"${threadAv.style}>${threadAv.text}</div>
       <div class="thread-header-info">
         <h2>${escapeHtml(conv.customer_name)}</h2>
         <div class="sub">${isWebsite ? '🌐 Đặt lịch từ Website' : escapeHtml(conv.page ? conv.page.name : '')}</div>
