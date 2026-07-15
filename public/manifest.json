@@ -1,10 +1,10 @@
 {
-  "name": "Hộp thư hợp nhất - Nha Khoa",
-  "short_name": "Hộp thư NK",
+  "name": "Nha Khoa Tiên Phong - Hộp thư hợp nhất",
+  "short_name": "Tiên Phong",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f9f9f7",
-  "theme_color": "#2a78d6",
+  "background_color": "#eef7fb",
+  "theme_color": "#159FD1",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }

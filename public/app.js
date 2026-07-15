@@ -295,7 +295,7 @@ function renderThread(conv) {
     <div class="msgs" id="msgsArea">
       ${conv.messages.map((m) => `
         <div class="msg-row ${m.direction}">
-          <div>
+          <div class="msg-col">
             <div class="bubble">
               ${renderAttachment(m)}
               ${m.text ? `<div class="msg-text${m.attachment_url ? ' msg-caption' : ''}">${linkify(m.text)}</div>` : ''}

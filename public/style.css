@@ -1,15 +1,18 @@
 :root{
-  --surface-1:#fcfcfb;
-  --page-plane:#f9f9f7;
+  --surface-1:#ffffff;
+  --page-plane:#eef7fb;
   --text-primary:#0b0b0b;
   --text-secondary:#52514e;
   --text-muted:#898781;
-  --gridline:#e1e0d9;
+  --gridline:#dceaf1;
   --baseline:#c3c2b7;
   --border:rgba(11,11,11,0.10);
   --border-strong:rgba(11,11,11,0.16);
-  --fb:#2a78d6;
-  --fb-tint:#eaf1fb;
+  --fb:#159FD1;
+  --fb-tint:#e3f4fb;
+  --brand-magenta:#c6368c;
+  --brand-green:#8cc63f;
+  --brand-orange:#f7a823;
   --good:#0ca30c;
   --good-tint:#e7f7e7;
   --warning:#fab219;
@@ -24,8 +27,10 @@ body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--
 
 /* ---------- Login ---------- */
 #loginScreen{ height:100vh; display:flex; align-items:center; justify-content:center; }
-.login-card{ background:var(--surface-1); border:1px solid var(--border); border-radius:14px; padding:32px; width:320px; box-shadow:0 4px 24px rgba(11,11,11,0.06); }
-.login-card h1{ font-size:16px; margin:0 0 4px; }
+.login-card{ background:var(--surface-1); border:1px solid var(--border); border-radius:14px; padding:32px; width:320px; box-shadow:0 4px 24px rgba(11,11,11,0.06); text-align:center; }
+.login-logo{ width:64px; height:64px; margin:0 auto 12px; display:block; }
+.login-card h1{ font-size:16px; margin:0 0 4px; letter-spacing:0.02em; text-align:center; }
+.login-card p{ text-align:left; }
 .login-card p{ font-size:12px; color:var(--text-muted); margin:0 0 20px; }
 .login-card input{ width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border-strong); font-size:13px; margin-bottom:10px; }
 .login-card button{ width:100%; background:var(--fb); color:#fff; border:none; border-radius:8px; padding:10px; font-size:13px; font-weight:600; cursor:pointer; }
@@ -35,7 +40,8 @@ body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--
 .app{ height:100vh; display:flex; flex-direction:column; }
 .topbar{ background:var(--surface-1); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
 .brand{ display:flex; align-items:center; gap:10px; }
-.brand-mark{ width:34px;height:34px;border-radius:9px; background:var(--fb); display:flex;align-items:center;justify-content:center; color:#fff;font-weight:700;font-size:14px; }
+.brand-mark{ width:36px;height:36px;border-radius:9px; background:var(--surface-1); border:1px solid var(--border); display:flex;align-items:center;justify-content:center; overflow:hidden; }
+.brand-mark img{ width:100%; height:100%; object-fit:contain; padding:2px; box-sizing:border-box; }
 .brand-text h1{ font-size:15px; margin:0; font-weight:700; }
 .brand-text span{ font-size:12px; color:var(--text-muted); }
 .stat-row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
@@ -98,13 +104,15 @@ body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--
 .msgs{ flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:10px; }
 .msg-row{ display:flex; }
 .msg-row.out{ justify-content:flex-end; }
-.bubble{ max-width:62%; padding:9px 13px; border-radius:14px; font-size:13px; line-height:1.5; box-shadow:0 1px 1px rgba(11,11,11,0.04); }
+.msg-col{ display:flex; flex-direction:column; max-width:62%; min-width:0; }
+.msg-row.in .msg-col{ align-items:flex-start; }
+.msg-row.out .msg-col{ align-items:flex-end; }
+.bubble{ min-width:0; padding:9px 13px; border-radius:14px; font-size:13px; line-height:1.5; box-shadow:0 1px 1px rgba(11,11,11,0.04); }
 .msg-text{ white-space:pre-wrap; }
 .msg-row.in .bubble{ background:var(--surface-1); border:1px solid var(--border); border-bottom-left-radius:4px; }
 .msg-row.out .bubble{ background:var(--fb); color:#fff; border-bottom-right-radius:4px; }
 .bubble a{ color:inherit; text-decoration:underline; }
 .msg-time{ font-size:10px; color:var(--text-muted); margin-top:3px; }
-.msg-row.out .msg-time{ text-align:right; }
 .msg-media{ display:block; max-width:100%; max-height:260px; border-radius:10px; cursor:pointer; margin-bottom:4px; }
 .msg-caption{ margin-top:2px; }
 .msg-file-link{ color:inherit; font-weight:600; }
@@ -190,5 +198,5 @@ body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--
   .side-panel.mobile-show{ transform:translateY(0); }
 
   .thread-tags{ order:5; width:100%; margin-left:0; margin-top:6px; }
-  .bubble{ max-width:82%; }
+  .msg-col{ max-width:82%; }
 }
