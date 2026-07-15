@@ -527,7 +527,7 @@ function renderPagesAdmin() {
   const wrap = $('#pagesList');
   wrap.innerHTML = '';
   pages.filter((p) => p.channel !== 'website').forEach((p) => {
-    const row = el('div', { class: 'list-row' }, `<span class="grow"><b>${escapeHtml(p.name)}</b> — Page ID: ${escapeHtml(p.page_id)} — Token: ${escapeHtml(p.access_token_masked)}</span><span class="sync-hist" style="cursor:pointer;color:var(--fb);margin-right:10px;">🔄 Đồng bộ 30 ngày</span><span class="sync-avatars" style="cursor:pointer;color:var(--fb);margin-right:10px;">🖼 Cập nhật avatar</span><span class="del">Xoá</span>`);
+    const row = el('div', { class: 'list-row' }, `<span class="grow"><b>${escapeHtml(p.name)}</b> — Page ID: ${escapeHtml(p.page_id)} — Token: ${escapeHtml(p.access_token_masked)}</span><span class="sync-hist" style="cursor:pointer;color:var(--fb);margin-right:10px;">🔄 Đồng bộ 30 ngày</span><span class="del">Xoá</span>`);
     row.querySelector('.sync-hist').addEventListener('click', async (e) => {
       const label = e.target;
       const original = label.textContent;
@@ -538,21 +538,6 @@ function renderPagesAdmin() {
         loadConversations();
       } catch (err) {
         alert('Đồng bộ thất bại: ' + err.message);
-      } finally {
-        label.textContent = original;
-      }
-    });
-    row.querySelector('.sync-avatars').addEventListener('click', async (e) => {
-      const label = e.target;
-      const original = label.textContent;
-      label.textContent = 'Đang lấy avatar…';
-      try {
-        const result = await api(`/api/pages/${p.id}/sync-avatars`, { method: 'POST' });
-        alert(`Đã kiểm tra ${result.checked} hội thoại — cập nhật avatar cho ${result.updated}, ${result.failed} không lấy được.`);
-        loadConversations();
-        if (activeConvId) { const fresh = await api(`/api/conversations/${activeConvId}`); renderThread(fresh); renderCustomerCard(fresh); }
-      } catch (err) {
-        alert('Cập nhật avatar thất bại: ' + err.message);
       } finally {
         label.textContent = original;
       }
