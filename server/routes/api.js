@@ -272,24 +272,13 @@ router.get('/conversations', (req, res) => {
 });
 
 router.get('/conversations/:id', async (req, res) => {
-  let conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+  // NOTE: this used to also best-effort backfill customer_avatar_url on every call (and this
+  // endpoint is polled every ~8s for whatever conversation is open) — removed because Facebook
+  // rejects that Graph API call for real customers (requires Meta App Review), so it always
+  // failed and just flooded the Render logs with the same error every few seconds. Decision:
+  // keep the initials avatar fallback instead (see public/app.js avatarAttrs()).
+  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
-
-  // Backfill the customer's real Facebook avatar the first time an older conversation is opened
-  // (conversations created before this feature existed won't have one yet). Best-effort — a
-  // failed/slow Graph API call here should never block viewing the conversation.
-  if (!conv.customer_avatar_url) {
-    const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(conv.page_row_id);
-    if (page && page.channel !== 'website' && page.access_token) {
-      try {
-        const profile = await fetchUserProfile(page.access_token, conv.customer_psid);
-        if (profile.avatarUrl) {
-          db.prepare('UPDATE conversations SET customer_avatar_url = ? WHERE id = ?').run(profile.avatarUrl, conv.id);
-          conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(conv.id);
-        }
-      } catch { /* ignore — fall back to initials avatar on the frontend */ }
-    }
-  }
 
   const messages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC').all(conv.id);
   res.json({ ...serializeConversation(conv), messages });
