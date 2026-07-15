@@ -2,10 +2,12 @@
 // Uses a single file DB under /data so it survives restarts on most hosts
 // (on ephemeral hosts, mount a persistent disk at DB_PATH's folder).
 
+const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'app.db');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true }); // create the data/ folder if it wasn't uploaded
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
