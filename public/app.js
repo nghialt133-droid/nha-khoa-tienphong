@@ -55,6 +55,11 @@ function updateTitleBadge() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { unreadTitleCount = 0; updateTitleBadge(); }
 });
+// Reflect the real, already-granted permission on load — otherwise the button looks "off" after
+// a page refresh even though notifications were enabled in an earlier visit and are still working.
+if ('Notification' in window && Notification.permission === 'granted') {
+  $('#notifyBtn').textContent = '🔔 Đã bật thông báo';
+}
 $('#notifyBtn').addEventListener('click', async () => {
   if (!('Notification' in window)) return alert('Trình duyệt này không hỗ trợ thông báo trên màn hình.');
   const perm = await Notification.requestPermission();
@@ -140,21 +145,25 @@ async function loadConversations() {
   renderConvList();
 }
 
-function captureUnreadBaseline() {
-  prevUnreadByConv = Object.fromEntries(conversations.map((c) => [c.id, c.unread_count]));
+function captureUnreadBaseline(list) {
+  prevUnreadByConv = Object.fromEntries((list || conversations).map((c) => [c.id, c.unread_count]));
 }
 
 async function pollTick() {
   try {
     await loadStats();
     const before = prevUnreadByConv;
-    await loadConversations();
-    // Detect conversations whose unread count just went up -> new inbound message(s)
-    const newlyMessaged = conversations.filter((c) => (before[c.id] ?? 0) < c.unread_count);
+    // Always diff against the FULL, unfiltered conversation list — not the (possibly filtered)
+    // one used for display. Otherwise, filtering to one fanpage/tag/search silently suppresses
+    // notifications for new messages arriving on every other fanpage/tag while that filter is active.
+    const allConvs = await api('/api/conversations');
+    const newlyMessaged = allConvs.filter((c) => (before[c.id] ?? 0) < c.unread_count);
     if (newlyMessaged.length > 0 && Object.keys(before).length > 0) {
       notifyNewMessages(newlyMessaged.map((c) => c.customer_name));
     }
-    captureUnreadBaseline();
+    captureUnreadBaseline(allConvs);
+
+    await loadConversations(); // refresh whatever (possibly filtered) list is currently displayed
 
     if (activeConvId) {
       const conv = await api(`/api/conversations/${activeConvId}`);
