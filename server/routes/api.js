@@ -126,6 +126,7 @@ router.post('/pages/:id/sync-history', async (req, res) => {
       if (!msgs.length) continue;
 
       let row = db.prepare('SELECT * FROM conversations WHERE page_row_id = ? AND customer_psid = ?').get(page.id, psid);
+      const isNewRow = !row;
       if (!row) {
         const info = db
           .prepare(`INSERT INTO conversations (page_row_id, customer_psid, customer_name, last_message_preview, unread_count) VALUES (?, ?, ?, '', 0)`)
@@ -147,9 +148,18 @@ router.post('/pages/:id/sync-history', async (req, res) => {
         const latest = msgs[msgs.length - 1];
         const preview = (latest.message || '[Tệp đính kèm]').slice(0, 140);
         const latestAt = new Date(latest.created_time).toISOString().replace('T', ' ').replace(/\..+/, '');
-        db.prepare(
-          `UPDATE conversations SET last_message_preview = ?, last_message_at = MAX(last_message_at, ?) WHERE id = ?`
-        ).run(preview, latestAt, row.id);
+        // A brand-new row's last_message_at still holds its INSERT-time default ("now"), which is
+        // always more recent than any historical message being imported — so MAX(last_message_at, ?)
+        // would always keep "now" instead of the real message time. Only rows that already existed
+        // before this sync (e.g. touched by a live webhook message since) should use MAX, to avoid
+        // regressing a legitimately newer timestamp backward.
+        if (isNewRow) {
+          db.prepare('UPDATE conversations SET last_message_preview = ?, last_message_at = ? WHERE id = ?').run(preview, latestAt, row.id);
+        } else {
+          db.prepare(
+            `UPDATE conversations SET last_message_preview = ?, last_message_at = MAX(last_message_at, ?) WHERE id = ?`
+          ).run(preview, latestAt, row.id);
+        }
         conversationsTouched++;
       }
     }

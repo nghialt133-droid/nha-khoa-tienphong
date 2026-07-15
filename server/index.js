@@ -2,7 +2,6 @@
 require('dotenv').config();
 const path = require('path');
 const express = require('express');
-const session = require('express-session');
 
 const { router: authRouter, requireAuth } = require('./routes/auth');
 const webhookRouter = require('./routes/webhook');
@@ -12,17 +11,12 @@ const apiRouter = require('./routes/api');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust Render's proxy so req.secure / x-forwarded-proto reflect the real (https) request —
+// needed for the login cookie's `secure` flag to be set correctly (see routes/auth.js).
+app.set('trust proxy', 1);
+
 // Webhook needs raw JSON body parsing too — express.json() covers it.
 app.use(express.json());
-
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || 'nha-khoa-inbox-secret-doi-di',
-    resave: false,
-    saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 24 * 30 }, // 30 days
-  })
-);
 
 // Meta webhook — NOT behind login (Meta calls this directly)
 app.use('/', webhookRouter);
