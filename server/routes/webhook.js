@@ -61,19 +61,25 @@ async function handleIncomingMessage(page, psid, text, attachment_url, attachmen
     .get(page.id, psid);
 
   if (!conv) {
-    let name = await fetchUserProfile(page.access_token, psid);
-    if (!name) name = `Khách hàng #${psid.slice(-5)}`;
+    const profile = await fetchUserProfile(page.access_token, psid);
+    const name = profile.name || `Khách hàng #${psid.slice(-5)}`;
     const info = db
       .prepare(
-        `INSERT INTO conversations (page_row_id, customer_psid, customer_name, last_message_preview, unread_count)
-         VALUES (?, ?, ?, ?, 1)`
+        `INSERT INTO conversations (page_row_id, customer_psid, customer_name, customer_avatar_url, last_message_preview, unread_count)
+         VALUES (?, ?, ?, ?, ?, 1)`
       )
-      .run(page.id, psid, name, preview.slice(0, 140));
+      .run(page.id, psid, name, profile.avatarUrl, preview.slice(0, 140));
     conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
   } else {
     db.prepare(
       `UPDATE conversations SET last_message_preview = ?, last_message_at = datetime('now'), unread_count = unread_count + 1 WHERE id = ?`
     ).run(preview.slice(0, 140), conv.id);
+    // Backfill the avatar for conversations created before this feature existed (best-effort, non-blocking on failure).
+    if (!conv.customer_avatar_url) {
+      fetchUserProfile(page.access_token, psid).then((profile) => {
+        if (profile.avatarUrl) db.prepare('UPDATE conversations SET customer_avatar_url = ? WHERE id = ?').run(profile.avatarUrl, conv.id);
+      }).catch(() => {});
+    }
   }
 
   db.prepare(

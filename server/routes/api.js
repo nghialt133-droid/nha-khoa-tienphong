@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const db = require('../db');
-const { sendTextMessage, sendAttachment, fetchConversationHistory } = require('../facebook');
+const { sendTextMessage, sendAttachment, fetchConversationHistory, fetchUserProfile } = require('../facebook');
 
 const router = express.Router();
 
@@ -194,9 +194,26 @@ router.get('/conversations', (req, res) => {
   res.json(list);
 });
 
-router.get('/conversations/:id', (req, res) => {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+router.get('/conversations/:id', async (req, res) => {
+  let conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+
+  // Backfill the customer's real Facebook avatar the first time an older conversation is opened
+  // (conversations created before this feature existed won't have one yet). Best-effort — a
+  // failed/slow Graph API call here should never block viewing the conversation.
+  if (!conv.customer_avatar_url) {
+    const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(conv.page_row_id);
+    if (page && page.channel !== 'website' && page.access_token) {
+      try {
+        const profile = await fetchUserProfile(page.access_token, conv.customer_psid);
+        if (profile.avatarUrl) {
+          db.prepare('UPDATE conversations SET customer_avatar_url = ? WHERE id = ?').run(profile.avatarUrl, conv.id);
+          conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(conv.id);
+        }
+      } catch { /* ignore — fall back to initials avatar on the frontend */ }
+    }
+  }
+
   const messages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC').all(conv.id);
   res.json({ ...serializeConversation(conv), messages });
 });
