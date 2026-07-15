@@ -1,0 +1,414 @@
+// routes/api.js — REST API used by the frontend dashboard
+const path = require('path');
+const crypto = require('crypto');
+const express = require('express');
+const multer = require('multer');
+const db = require('../db');
+const { sendTextMessage, sendAttachment, fetchConversationHistory, fetchUserProfile, fetchPageAvatar } = require('../facebook');
+
+const router = express.Router();
+
+const UPLOAD_DIR = path.join(__dirname, '..', '..', 'public', 'uploads');
+const ALLOWED_MIME = /^(image\/(jpeg|png|gif|webp)|video\/(mp4|quicktime|webm))$/;
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`);
+  },
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB — Messenger's own attachment limit is ~25MB
+  fileFilter: (req, file, cb) => cb(null, ALLOWED_MIME.test(file.mimetype)),
+});
+
+/* ================= UPLOAD (ảnh / video đính kèm) ================= */
+router.post('/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Không nhận được file, hoặc định dạng không được hỗ trợ (chỉ ảnh jpg/png/gif/webp hoặc video mp4/mov/webm, tối đa 20MB).' });
+  const host = req.get('host');
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const url = `${proto}://${host}/uploads/${req.file.filename}`;
+  const type = req.file.mimetype.startsWith('video') ? 'video' : 'image';
+  res.json({ url, type });
+});
+
+function maskToken(token) {
+  if (!token) return '';
+  return token.length <= 8 ? '••••••••' : `${token.slice(0, 6)}…${token.slice(-4)}`;
+}
+
+function serializeConversation(conv) {
+  const tags = db
+    .prepare(
+      `SELECT t.id, t.name, t.color FROM tags t
+       JOIN conversation_tags ct ON ct.tag_id = t.id
+       WHERE ct.conversation_id = ? ORDER BY t.sort_order`
+    )
+    .all(conv.id);
+  const page = db.prepare('SELECT id, name, page_id, channel FROM pages WHERE id = ?').get(conv.page_row_id);
+  return { ...conv, tags, page };
+}
+
+/* ================= PAGES (fanpage connections) ================= */
+router.get('/pages', async (req, res) => {
+  let pages = db.prepare('SELECT * FROM pages ORDER BY id').all();
+  // Lazy best-effort backfill: the Page's own avatar (different from — and not blocked
+  // like — a customer's profile picture, see fetchPageAvatar in facebook.js). Only runs
+  // for pages that don't have one cached yet, so this is a no-op after the first load.
+  const missing = pages.filter((p) => p.channel !== 'website' && !p.avatar_url && p.access_token);
+  for (const p of missing) {
+    const avatarUrl = await fetchPageAvatar(p.access_token);
+    if (avatarUrl) {
+      db.prepare('UPDATE pages SET avatar_url = ? WHERE id = ?').run(avatarUrl, p.id);
+      p.avatar_url = avatarUrl;
+    }
+  }
+  res.json(pages.map((p) => ({ ...p, access_token_masked: maskToken(p.access_token), access_token: undefined })));
+});
+
+router.post('/pages', async (req, res) => {
+  const { name, page_id, access_token } = req.body;
+  if (!name || !page_id || !access_token) return res.status(400).json({ error: 'Thiếu name, page_id hoặc access_token' });
+  const count = db.prepare('SELECT COUNT(*) AS n FROM pages').get().n;
+  if (count >= 5) return res.status(400).json({ error: 'Đã đạt giới hạn 5 fanpage trong bản này' });
+  try {
+    const info = db
+      .prepare('INSERT INTO pages (name, page_id, access_token) VALUES (?, ?, ?)')
+      .run(name, page_id, access_token);
+    // Best-effort — grab the page's own avatar right away so it shows up immediately
+    // instead of waiting for the next GET /pages lazy backfill.
+    const avatarUrl = await fetchPageAvatar(access_token);
+    if (avatarUrl) db.prepare('UPDATE pages SET avatar_url = ? WHERE id = ?').run(avatarUrl, info.lastInsertRowid);
+    res.json({ id: info.lastInsertRowid });
+  } catch (e) {
+    res.status(400).json({ error: e.message.includes('UNIQUE') ? 'Page ID này đã được kết nối rồi' : e.message });
+  }
+});
+
+router.put('/pages/:id', (req, res) => {
+  const { name, access_token, active } = req.body;
+  const existing = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
+  db.prepare('UPDATE pages SET name = ?, access_token = ?, active = ? WHERE id = ?').run(
+    name ?? existing.name,
+    access_token ?? existing.access_token,
+    active === undefined ? existing.active : (active ? 1 : 0),
+    req.params.id
+  );
+  res.json({ ok: true });
+});
+
+router.delete('/pages/:id', (req, res) => {
+  db.prepare('DELETE FROM pages WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+/**
+ * Pull the last N days of conversation history for one connected fanpage
+ * from Meta's Conversations API (separate from the webhook, which only
+ * streams NEW messages going forward). Text only for now — attachments in
+ * old history are noted as a placeholder rather than re-downloaded.
+ */
+router.post('/pages/:id/sync-history', async (req, res) => {
+  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
+  if (!page) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
+
+  const days = Math.min(Math.max(parseInt(req.body?.days, 10) || 30, 1), 365);
+  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+  // Upsert (not insert-or-ignore) so that re-running a sync also retroactively fixes messages
+  // imported by an older version of this endpoint — e.g. old/attachment-only messages that used
+  // to be stored as a "[Tệp đính kèm cũ]" placeholder now get the real image/video URL filled in.
+  const upsertMsg = db.prepare(`
+    INSERT INTO messages (conversation_id, direction, text, attachment_url, attachment_type, fb_message_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(conversation_id, fb_message_id) DO UPDATE SET
+      text = excluded.text,
+      attachment_url = excluded.attachment_url,
+      attachment_type = excluded.attachment_type
+  `);
+
+  let conversationsTouched = 0;
+  let messagesImported = 0;
+
+  try {
+    const history = await fetchConversationHistory(page.access_token, sinceMs);
+
+    for (const conv of history) {
+      const participants = conv.participants?.data || [];
+      const customer = participants.find((p) => p.id !== page.page_id);
+      if (!customer) continue;
+      const psid = customer.id;
+      const customerName = customer.name || `Khách hàng #${psid.slice(-5)}`;
+
+      const msgs = (conv.messages?.data || [])
+        .filter((m) => m.created_time && new Date(m.created_time).getTime() >= sinceMs)
+        .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+      if (!msgs.length) continue;
+
+      let row = db.prepare('SELECT * FROM conversations WHERE page_row_id = ? AND customer_psid = ?').get(page.id, psid);
+      const isNewRow = !row;
+      if (!row) {
+        const info = db
+          .prepare(`INSERT INTO conversations (page_row_id, customer_psid, customer_name, last_message_preview, unread_count) VALUES (?, ?, ?, '', 0)`)
+          .run(page.id, psid, customerName);
+        row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+      }
+
+      let importedForThisConv = 0;
+      for (const m of msgs) {
+        const direction = m.from?.id === page.page_id ? 'out' : 'in';
+        const attachmentsData = m.attachments?.data || [];
+        const firstAtt = attachmentsData[0];
+        let attachment_url = null;
+        let attachment_type = null;
+        if (firstAtt && firstAtt.file_url) {
+          attachment_url = firstAtt.file_url;
+          const mime = firstAtt.mime_type || '';
+          attachment_type = mime.startsWith('image') ? 'image' : mime.startsWith('video') ? 'video' : 'file';
+        }
+        let text = m.message || '';
+        if (!text && !attachment_url && attachmentsData.length) {
+          // Had an attachment but Facebook didn't give us a usable URL for it (e.g. an
+          // unsupported/expired type) — keep a placeholder so the message isn't silently dropped.
+          text = '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]';
+        }
+        if (!text && !attachment_url) continue;
+        const info = upsertMsg.run(row.id, direction, text, attachment_url, attachment_type, m.id, m.created_time);
+        if (info.changes > 0) { messagesImported++; importedForThisConv++; }
+      }
+
+      if (importedForThisConv > 0) {
+        const latest = msgs[msgs.length - 1];
+        const preview = (latest.message || '[Tệp đính kèm]').slice(0, 140);
+        const latestAt = new Date(latest.created_time).toISOString().replace('T', ' ').replace(/\..+/, '');
+        // A brand-new row's last_message_at still holds its INSERT-time default ("now"), which is
+        // always more recent than any historical message being imported — so MAX(last_message_at, ?)
+        // would always keep "now" instead of the real message time. Only rows that already existed
+        // before this sync (e.g. touched by a live webhook message since) should use MAX, to avoid
+        // regressing a legitimately newer timestamp backward.
+        if (isNewRow) {
+          db.prepare('UPDATE conversations SET last_message_preview = ?, last_message_at = ? WHERE id = ?').run(preview, latestAt, row.id);
+        } else {
+          db.prepare(
+            `UPDATE conversations SET last_message_preview = ?, last_message_at = MAX(last_message_at, ?) WHERE id = ?`
+          ).run(preview, latestAt, row.id);
+        }
+        conversationsTouched++;
+      }
+    }
+
+    res.json({ ok: true, days, conversations: conversationsTouched, messages_imported: messagesImported });
+  } catch (e) {
+    console.error('sync-history error', e);
+    res.status(500).json({ error: e.message || 'Đồng bộ lịch sử thất bại' });
+  }
+});
+
+/**
+ * Backfill the real Facebook avatar for every conversation on this page that doesn't have one
+ * yet — covers conversations imported via sync-history (or created before the avatar feature
+ * existed), which otherwise only get an avatar the first time a staff member happens to open them.
+ * Calls are made one at a time (not in parallel) to stay well under Graph API rate limits.
+ */
+router.post('/pages/:id/sync-avatars', async (req, res) => {
+  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
+  if (!page) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
+  if (page.channel === 'website') return res.status(400).json({ error: 'Fanpage Website không có avatar Facebook' });
+
+  const rows = db.prepare('SELECT id, customer_psid FROM conversations WHERE page_row_id = ? AND customer_avatar_url IS NULL').all(page.id);
+
+  let updated = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      const profile = await fetchUserProfile(page.access_token, row.customer_psid);
+      if (profile.avatarUrl) {
+        db.prepare('UPDATE conversations SET customer_avatar_url = ? WHERE id = ?').run(profile.avatarUrl, row.id);
+        updated++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+  }
+
+  res.json({ ok: true, checked: rows.length, updated, failed });
+});
+
+router.get('/webhook-info', (req, res) => {
+  const host = req.get('host');
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  res.json({
+    webhook_url: `${proto}://${host}/webhook`,
+    verify_token: process.env.WEBHOOK_VERIFY_TOKEN || 'change_this_verify_token',
+  });
+});
+
+router.get('/website-webhook-info', (req, res) => {
+  const host = req.get('host');
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const token = process.env.WEBSITE_WEBHOOK_TOKEN || 'change_this_website_token';
+  res.json({
+    webhook_url: `${proto}://${host}/webhook/website-booking?token=${encodeURIComponent(token)}`,
+    token,
+  });
+});
+
+/* ================= CONVERSATIONS ================= */
+router.get('/conversations', (req, res) => {
+  const { page_row_id, tag_id, search, status } = req.query;
+  let sql = 'SELECT * FROM conversations WHERE 1=1';
+  const params = [];
+  if (page_row_id) { sql += ' AND page_row_id = ?'; params.push(page_row_id); }
+  if (search) { sql += ' AND (customer_name LIKE ? OR last_message_preview LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
+  if (status === 'unread') sql += ' AND unread_count > 0';
+  sql += ' ORDER BY last_message_at DESC LIMIT 300';
+  let list = db.prepare(sql).all(...params).map(serializeConversation);
+  if (tag_id) list = list.filter((c) => c.tags.some((t) => String(t.id) === String(tag_id)));
+  res.json(list);
+});
+
+router.get('/conversations/:id', async (req, res) => {
+  // NOTE: this used to also best-effort backfill customer_avatar_url on every call (and this
+  // endpoint is polled every ~8s for whatever conversation is open) — removed because Facebook
+  // rejects that Graph API call for real customers (requires Meta App Review), so it always
+  // failed and just flooded the Render logs with the same error every few seconds. Decision:
+  // keep the initials avatar fallback instead (see public/app.js avatarAttrs()).
+  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+
+  const messages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC').all(conv.id);
+  res.json({ ...serializeConversation(conv), messages });
+});
+
+router.post('/conversations/:id/read', (req, res) => {
+  db.prepare('UPDATE conversations SET unread_count = 0 WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+router.post('/conversations/:id/messages', async (req, res) => {
+  const { text, attachment_url, attachment_type, staff_name } = req.body;
+  const cleanText = (text || '').trim();
+  if (!cleanText && !attachment_url) return res.status(400).json({ error: 'Tin nhắn trống' });
+  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(conv.page_row_id);
+  if (!page) return res.status(400).json({ error: 'Fanpage của hội thoại này chưa được cấu hình' });
+
+  try {
+    if (attachment_url) {
+      await sendAttachment(page.access_token, conv.customer_psid, attachment_url, attachment_type === 'video' ? 'video' : 'image');
+      if (cleanText) await sendTextMessage(page.access_token, conv.customer_psid, cleanText);
+    } else {
+      await sendTextMessage(page.access_token, conv.customer_psid, cleanText);
+    }
+  } catch (e) {
+    return res.status(502).json({
+      error: `Gửi thất bại qua Facebook: ${e.message}. Lưu ý: chỉ gửi được tin tự do trong vòng 24h kể từ tin nhắn cuối của khách.`,
+    });
+  }
+
+  db.prepare(
+    `INSERT INTO messages (conversation_id, direction, text, staff_name, attachment_url, attachment_type) VALUES (?, 'out', ?, ?, ?, ?)`
+  ).run(conv.id, cleanText, staff_name || null, attachment_url || null, attachment_url ? (attachment_type === 'video' ? 'video' : 'image') : null);
+
+  const preview = cleanText || (attachment_type === 'video' ? '🎥 Đã gửi video' : attachment_url ? '📷 Đã gửi ảnh' : '');
+  db.prepare(`UPDATE conversations SET last_message_preview = ?, last_message_at = datetime('now') WHERE id = ?`).run(
+    preview.slice(0, 140),
+    conv.id
+  );
+  res.json({ ok: true });
+});
+
+/* ================= TAGS ================= */
+router.get('/tags', (req, res) => {
+  res.json(db.prepare('SELECT * FROM tags ORDER BY sort_order, id').all());
+});
+
+router.post('/tags', (req, res) => {
+  const { name, color } = req.body;
+  if (!name) return res.status(400).json({ error: 'Thiếu tên tag' });
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS m FROM tags').get().m;
+  try {
+    const info = db.prepare('INSERT INTO tags (name, color, sort_order) VALUES (?, ?, ?)').run(name, color || '#2a78d6', maxOrder + 1);
+    res.json({ id: info.lastInsertRowid });
+  } catch (e) {
+    res.status(400).json({ error: e.message.includes('UNIQUE') ? 'Tag này đã tồn tại' : e.message });
+  }
+});
+
+router.delete('/tags/:id', (req, res) => {
+  db.prepare('DELETE FROM tags WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+router.post('/conversations/:id/tags', (req, res) => {
+  const { tag_id } = req.body;
+  db.prepare('INSERT OR IGNORE INTO conversation_tags (conversation_id, tag_id) VALUES (?, ?)').run(req.params.id, tag_id);
+  res.json({ ok: true });
+});
+
+router.delete('/conversations/:id/tags/:tagId', (req, res) => {
+  db.prepare('DELETE FROM conversation_tags WHERE conversation_id = ? AND tag_id = ?').run(req.params.id, req.params.tagId);
+  res.json({ ok: true });
+});
+
+/* ================= TEMPLATES ================= */
+router.get('/templates', (req, res) => {
+  const categories = db.prepare('SELECT * FROM template_categories ORDER BY sort_order, id').all();
+  const items = db.prepare('SELECT * FROM templates ORDER BY sort_order, id').all();
+  res.json(categories.map((c) => ({ ...c, items: items.filter((i) => i.category_id === c.id) })));
+});
+
+router.post('/template-categories', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'Thiếu tên nhóm' });
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS m FROM template_categories').get().m;
+  const info = db.prepare('INSERT INTO template_categories (name, sort_order) VALUES (?, ?)').run(name, maxOrder + 1);
+  res.json({ id: info.lastInsertRowid });
+});
+
+router.delete('/template-categories/:id', (req, res) => {
+  db.prepare('DELETE FROM template_categories WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+router.post('/templates', (req, res) => {
+  const { category_id, label, text } = req.body;
+  if (!category_id || !label || !text) return res.status(400).json({ error: 'Thiếu category_id, label hoặc text' });
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS m FROM templates WHERE category_id = ?').get(category_id).m;
+  const info = db.prepare('INSERT INTO templates (category_id, label, text, sort_order) VALUES (?, ?, ?, ?)').run(category_id, label, text, maxOrder + 1);
+  res.json({ id: info.lastInsertRowid });
+});
+
+router.put('/templates/:id', (req, res) => {
+  const { label, text } = req.body;
+  const existing = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Không tìm thấy mẫu' });
+  db.prepare('UPDATE templates SET label = ?, text = ? WHERE id = ?').run(label ?? existing.label, text ?? existing.text, req.params.id);
+  res.json({ ok: true });
+});
+
+router.delete('/templates/:id', (req, res) => {
+  db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+/* ================= STATS ================= */
+router.get('/stats', (req, res) => {
+  const total = db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n;
+  const unread = db.prepare('SELECT COUNT(*) AS n FROM conversations WHERE unread_count > 0').get().n;
+  const bookedTag = db.prepare("SELECT id FROM tags WHERE name = 'Đã đặt hẹn'").get();
+  let booked = 0;
+  if (bookedTag) {
+    booked = db
+      .prepare('SELECT COUNT(DISTINCT conversation_id) AS n FROM conversation_tags WHERE tag_id = ?')
+      .get(bookedTag.id).n;
+  }
+  res.json({ total, unread, booked });
+});
+
+module.exports = router;
