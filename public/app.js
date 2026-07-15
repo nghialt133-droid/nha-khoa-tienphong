@@ -306,18 +306,34 @@ $('#hamburgerBtn').addEventListener('click', () => {
   $('#mainArea').classList.toggle('mobile-show-rail');
 });
 
+// Facebook PSIDs are page-scoped (unique to the page+customer pair), not the customer's real
+// user ID, so there's no direct public "facebook.com/<id>" profile link for one — Meta doesn't
+// expose that mapping without extra app permissions. The reliable link is the Messenger thread
+// itself: opens directly in Facebook (as the logged-in page admin), and from there staff can
+// click through to the customer's profile like normal. Website-booking "customers" aren't real
+// Facebook users at all (synthetic psid), so they never get a link.
+function customerFbLink(conv) {
+  const isWebsite = !!(conv.page && conv.page.channel === 'website');
+  if (isWebsite || !conv.customer_psid) return null;
+  return `https://www.facebook.com/messages/t/${encodeURIComponent(conv.customer_psid)}`;
+}
+
 function renderThread(conv) {
   lastMsgCount = conv.messages.length;
   pendingAttachment = null;
   const isWebsite = !!(conv.page && conv.page.channel === 'website');
   const threadAv = avatarAttrs(conv.customer_name, conv.customer_avatar_url);
+  const fbLink = customerFbLink(conv);
+  const nameHtml = fbLink
+    ? `<a href="${fbLink}" target="_blank" rel="noopener" title="Mở đoạn chat này trên Facebook">${escapeHtml(conv.customer_name)}</a>`
+    : escapeHtml(conv.customer_name);
   const panel = $('#threadPanel');
   panel.innerHTML = `
     <div class="thread-header">
       <button class="icon-btn mobile-only back-btn" id="backToListBtn">← Danh sách</button>
       <div class="avatar"${threadAv.style}>${threadAv.text}</div>
       <div class="thread-header-info">
-        <h2>${escapeHtml(conv.customer_name)}</h2>
+        <h2>${nameHtml}</h2>
         <div class="sub">${isWebsite ? '🌐 Đặt lịch từ Website' : escapeHtml(conv.page ? conv.page.name : '')}</div>
       </div>
       <div class="thread-tags" id="threadTags"></div>
@@ -486,8 +502,12 @@ async function sendMessage(convId) {
 /* ===================== Customer card + template sidebar ===================== */
 function renderCustomerCard(conv) {
   const isWebsite = !!(conv.page && conv.page.channel === 'website');
+  const fbLink = customerFbLink(conv);
+  const cnameHtml = fbLink
+    ? `<a href="${fbLink}" target="_blank" rel="noopener" title="Mở đoạn chat này trên Facebook">${escapeHtml(conv.customer_name)}</a>`
+    : escapeHtml(conv.customer_name);
   $('#customerCard').innerHTML = `
-    <div class="cname">${escapeHtml(conv.customer_name)}</div>
+    <div class="cname">${cnameHtml}</div>
     <div class="crow"><span>Nguồn</span><span>${isWebsite ? '🌐 Website' : escapeHtml(conv.page ? conv.page.name : '')}</span></div>
     ${conv.customer_phone ? `<div class="crow"><span>Điện thoại</span><span><a href="tel:${escapeHtml(conv.customer_phone)}">${escapeHtml(conv.customer_phone)}</a></span></div>` : ''}
     ${!isWebsite ? `<div class="crow"><span>PSID</span><span style="font-size:10px;">${escapeHtml(conv.customer_psid)}</span></div>` : ''}
