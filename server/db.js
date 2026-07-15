@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS pages (
   page_id TEXT NOT NULL UNIQUE,
   access_token TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
+  channel TEXT NOT NULL DEFAULT 'facebook',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   page_row_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
   customer_psid TEXT NOT NULL,
   customer_name TEXT NOT NULL DEFAULT 'Khách hàng',
+  customer_phone TEXT,
   last_message_preview TEXT NOT NULL DEFAULT '',
   last_message_at TEXT NOT NULL DEFAULT (datetime('now')),
   unread_count INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +83,27 @@ const msgCols = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.nam
 if (!msgCols.includes('staff_name')) db.exec('ALTER TABLE messages ADD COLUMN staff_name TEXT');
 if (!msgCols.includes('attachment_url')) db.exec('ALTER TABLE messages ADD COLUMN attachment_url TEXT');
 if (!msgCols.includes('attachment_type')) db.exec('ALTER TABLE messages ADD COLUMN attachment_type TEXT');
+if (!msgCols.includes('fb_message_id')) db.exec('ALTER TABLE messages ADD COLUMN fb_message_id TEXT');
+// Unique per-conversation only when fb_message_id is set (SQLite treats each NULL as distinct,
+// so rows without an fb_message_id — sent from the app itself, or via webhook — never collide).
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_fbid ON messages(conversation_id, fb_message_id)');
+
+// ---------- Migration for DBs created before the "website booking" channel existed ----------
+const pageCols = db.prepare("PRAGMA table_info(pages)").all().map((c) => c.name);
+if (!pageCols.includes('channel')) db.exec("ALTER TABLE pages ADD COLUMN channel TEXT NOT NULL DEFAULT 'facebook'");
+const convCols = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
+if (!convCols.includes('customer_phone')) db.exec('ALTER TABLE conversations ADD COLUMN customer_phone TEXT');
+
+// Seed a single virtual "page" that all website-form bookings attach to (not a real Facebook page,
+// so it has no access_token — just a container so bookings reuse the same conversations/messages tables).
+const websitePage = db.prepare("SELECT * FROM pages WHERE channel = 'website'").get();
+if (!websitePage) {
+  db.prepare("INSERT INTO pages (name, page_id, access_token, channel) VALUES (?, ?, ?, 'website')").run(
+    'Đặt lịch Website',
+    'website-booking-form',
+    ''
+  );
+}
 
 // ---------- Seed default tags (dental-specific) ----------
 const tagCount = db.prepare('SELECT COUNT(*) AS n FROM tags').get().n;
@@ -98,6 +121,13 @@ if (tagCount === 0) {
   const insertMany = db.transaction((rows) => { for (const r of rows) insertTag.run(...r); });
   insertMany(defaultTags);
 }
+// Always make sure this tag exists (even on older DBs that already had tags seeded before
+// the website-booking feature existed), so incoming website leads can be auto-tagged.
+db.prepare('INSERT OR IGNORE INTO tags (name, color, sort_order) VALUES (?, ?, ?)').run(
+  'Đặt lịch Website',
+  '#1baf7a',
+  999
+);
 
 // ---------- Seed default quick-reply templates ----------
 const catCount = db.prepare('SELECT COUNT(*) AS n FROM template_categories').get().n;

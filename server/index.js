@@ -6,6 +6,7 @@ const session = require('express-session');
 
 const { router: authRouter, requireAuth } = require('./routes/auth');
 const webhookRouter = require('./routes/webhook');
+const websiteRouter = require('./routes/website');
 const apiRouter = require('./routes/api');
 
 const app = express();
@@ -25,6 +26,10 @@ app.use(
 
 // Meta webhook — NOT behind login (Meta calls this directly)
 app.use('/', webhookRouter);
+
+// Website booking webhook — NOT behind login (the WordPress plugin calls this directly,
+// it's protected by its own secret ?token= instead of a session cookie).
+app.use('/', websiteRouter);
 
 // Auth endpoints (login/logout/me) — not behind login (login itself can't require login)
 app.use('/api/auth', authRouter);

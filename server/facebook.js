@@ -72,4 +72,46 @@ async function fetchUserProfile(pageAccessToken, psid) {
   }
 }
 
-module.exports = { sendTextMessage, sendAttachment, fetchUserProfile, GRAPH_BASE };
+/**
+ * Pull a Page's conversation history from the Graph API Conversations endpoint
+ * (Meta Business Inbox data — separate from the webhook, which only streams
+ * NEW messages going forward). Returns messages no older than `sinceMs`.
+ *
+ * Conversations come back newest-first (by updated_time), so we stop paging
+ * as soon as an entire page of conversations is older than the cutoff.
+ */
+async function fetchConversationHistory(pageAccessToken, sinceMs, { maxConversations = 200 } = {}) {
+  const conversations = [];
+  let url =
+    `${GRAPH_BASE}/me/conversations?fields=` +
+    encodeURIComponent('participants,updated_time,messages.limit(100){id,message,from,to,created_time,attachments}') +
+    `&limit=25&access_token=${encodeURIComponent(pageAccessToken)}`;
+
+  while (url && conversations.length < maxConversations) {
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data?.error?.message || `Graph API error (${res.status})`);
+      err.graph = data;
+      throw err;
+    }
+    let hitOldConversation = false;
+    for (const conv of data.data || []) {
+      const updatedMs = conv.updated_time ? new Date(conv.updated_time).getTime() : 0;
+      if (updatedMs && updatedMs < sinceMs) { hitOldConversation = true; continue; }
+      conversations.push(conv);
+      if (conversations.length >= maxConversations) break;
+    }
+    // Conversations are sorted newest-first — once a whole page is older than the
+    // cutoff, everything after it is older too, so stop paging.
+    const allOldThisPage = (data.data || []).length > 0 && (data.data || []).every((c) => {
+      const t = c.updated_time ? new Date(c.updated_time).getTime() : 0;
+      return t && t < sinceMs;
+    });
+    if (allOldThisPage) break;
+    url = data.paging && data.paging.next ? data.paging.next : null;
+  }
+  return conversations;
+}
+
+module.exports = { sendTextMessage, sendAttachment, fetchUserProfile, fetchConversationHistory, GRAPH_BASE };
