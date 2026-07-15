@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const db = require('../db');
-const { sendTextMessage, sendAttachment } = require('../facebook');
+const { sendTextMessage, sendAttachment, fetchConversationHistory } = require('../facebook');
 
 const router = express.Router();
 
@@ -46,7 +46,7 @@ function serializeConversation(conv) {
        WHERE ct.conversation_id = ? ORDER BY t.sort_order`
     )
     .all(conv.id);
-  const page = db.prepare('SELECT id, name, page_id FROM pages WHERE id = ?').get(conv.page_row_id);
+  const page = db.prepare('SELECT id, name, page_id, channel FROM pages WHERE id = ?').get(conv.page_row_id);
   return { ...conv, tags, page };
 }
 
@@ -89,12 +89,94 @@ router.delete('/pages/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * Pull the last N days of conversation history for one connected fanpage
+ * from Meta's Conversations API (separate from the webhook, which only
+ * streams NEW messages going forward). Text only for now — attachments in
+ * old history are noted as a placeholder rather than re-downloaded.
+ */
+router.post('/pages/:id/sync-history', async (req, res) => {
+  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
+  if (!page) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
+
+  const days = Math.min(Math.max(parseInt(req.body?.days, 10) || 30, 1), 365);
+  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+  const insertMsg = db.prepare(
+    `INSERT OR IGNORE INTO messages (conversation_id, direction, text, fb_message_id, created_at)
+     VALUES (?, ?, ?, ?, ?)`
+  );
+
+  let conversationsTouched = 0;
+  let messagesImported = 0;
+
+  try {
+    const history = await fetchConversationHistory(page.access_token, sinceMs);
+
+    for (const conv of history) {
+      const participants = conv.participants?.data || [];
+      const customer = participants.find((p) => p.id !== page.page_id);
+      if (!customer) continue;
+      const psid = customer.id;
+      const customerName = customer.name || `Khách hàng #${psid.slice(-5)}`;
+
+      const msgs = (conv.messages?.data || [])
+        .filter((m) => m.created_time && new Date(m.created_time).getTime() >= sinceMs)
+        .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+      if (!msgs.length) continue;
+
+      let row = db.prepare('SELECT * FROM conversations WHERE page_row_id = ? AND customer_psid = ?').get(page.id, psid);
+      if (!row) {
+        const info = db
+          .prepare(`INSERT INTO conversations (page_row_id, customer_psid, customer_name, last_message_preview, unread_count) VALUES (?, ?, ?, '', 0)`)
+          .run(page.id, psid, customerName);
+        row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+      }
+
+      let importedForThisConv = 0;
+      for (const m of msgs) {
+        const direction = m.from?.id === page.page_id ? 'out' : 'in';
+        const hasAttachment = !!(m.attachments && (m.attachments.data || []).length);
+        const text = m.message || (hasAttachment ? '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]' : '');
+        if (!text) continue;
+        const info = insertMsg.run(row.id, direction, text, m.id, m.created_time);
+        if (info.changes > 0) { messagesImported++; importedForThisConv++; }
+      }
+
+      if (importedForThisConv > 0) {
+        const latest = msgs[msgs.length - 1];
+        const preview = (latest.message || '[Tệp đính kèm]').slice(0, 140);
+        const latestAt = new Date(latest.created_time).toISOString().replace('T', ' ').replace(/\..+/, '');
+        db.prepare(
+          `UPDATE conversations SET last_message_preview = ?, last_message_at = MAX(last_message_at, ?) WHERE id = ?`
+        ).run(preview, latestAt, row.id);
+        conversationsTouched++;
+      }
+    }
+
+    res.json({ ok: true, days, conversations: conversationsTouched, messages_imported: messagesImported });
+  } catch (e) {
+    console.error('sync-history error', e);
+    res.status(500).json({ error: e.message || 'Đồng bộ lịch sử thất bại' });
+  }
+});
+
 router.get('/webhook-info', (req, res) => {
   const host = req.get('host');
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   res.json({
     webhook_url: `${proto}://${host}/webhook`,
     verify_token: process.env.WEBHOOK_VERIFY_TOKEN || 'change_this_verify_token',
+  });
+});
+
+router.get('/website-webhook-info', (req, res) => {
+  const host = req.get('host');
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const token = process.env.WEBSITE_WEBHOOK_TOKEN || 'change_this_website_token';
+  res.json({
+    webhook_url: `${proto}://${host}/webhook/website-booking?token=${encodeURIComponent(token)}`,
+    token,
   });
 });
 
