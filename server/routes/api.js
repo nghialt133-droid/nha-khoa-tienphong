@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const db = require('../db');
-const { sendTextMessage, sendAttachment, fetchConversationHistory, fetchUserProfile } = require('../facebook');
+const { sendTextMessage, sendAttachment, fetchConversationHistory, fetchUserProfile, fetchPageAvatar } = require('../facebook');
 
 const router = express.Router();
 
@@ -51,12 +51,23 @@ function serializeConversation(conv) {
 }
 
 /* ================= PAGES (fanpage connections) ================= */
-router.get('/pages', (req, res) => {
-  const pages = db.prepare('SELECT * FROM pages ORDER BY id').all();
+router.get('/pages', async (req, res) => {
+  let pages = db.prepare('SELECT * FROM pages ORDER BY id').all();
+  // Lazy best-effort backfill: the Page's own avatar (different from — and not blocked
+  // like — a customer's profile picture, see fetchPageAvatar in facebook.js). Only runs
+  // for pages that don't have one cached yet, so this is a no-op after the first load.
+  const missing = pages.filter((p) => p.channel !== 'website' && !p.avatar_url && p.access_token);
+  for (const p of missing) {
+    const avatarUrl = await fetchPageAvatar(p.access_token);
+    if (avatarUrl) {
+      db.prepare('UPDATE pages SET avatar_url = ? WHERE id = ?').run(avatarUrl, p.id);
+      p.avatar_url = avatarUrl;
+    }
+  }
   res.json(pages.map((p) => ({ ...p, access_token_masked: maskToken(p.access_token), access_token: undefined })));
 });
 
-router.post('/pages', (req, res) => {
+router.post('/pages', async (req, res) => {
   const { name, page_id, access_token } = req.body;
   if (!name || !page_id || !access_token) return res.status(400).json({ error: 'Thiếu name, page_id hoặc access_token' });
   const count = db.prepare('SELECT COUNT(*) AS n FROM pages').get().n;
@@ -65,6 +76,10 @@ router.post('/pages', (req, res) => {
     const info = db
       .prepare('INSERT INTO pages (name, page_id, access_token) VALUES (?, ?, ?)')
       .run(name, page_id, access_token);
+    // Best-effort — grab the page's own avatar right away so it shows up immediately
+    // instead of waiting for the next GET /pages lazy backfill.
+    const avatarUrl = await fetchPageAvatar(access_token);
+    if (avatarUrl) db.prepare('UPDATE pages SET avatar_url = ? WHERE id = ?').run(avatarUrl, info.lastInsertRowid);
     res.json({ id: info.lastInsertRowid });
   } catch (e) {
     res.status(400).json({ error: e.message.includes('UNIQUE') ? 'Page ID này đã được kết nối rồi' : e.message });

@@ -95,6 +95,7 @@ if (!pageCols.includes('channel')) db.exec("ALTER TABLE pages ADD COLUMN channel
 const convCols = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
 if (!convCols.includes('customer_phone')) db.exec('ALTER TABLE conversations ADD COLUMN customer_phone TEXT');
 if (!convCols.includes('customer_avatar_url')) db.exec('ALTER TABLE conversations ADD COLUMN customer_avatar_url TEXT');
+if (!pageCols.includes('avatar_url')) db.exec('ALTER TABLE pages ADD COLUMN avatar_url TEXT');
 
 // Seed a single virtual "page" that all website-form bookings attach to (not a real Facebook page,
 // so it has no access_token — just a container so bookings reuse the same conversations/messages tables).

@@ -83,6 +83,28 @@ async function fetchUserProfile(pageAccessToken, psid) {
 }
 
 /**
+ * Best-effort fetch of a connected Page's own profile picture (not a customer's —
+ * this is the Page's public avatar, which any valid Page access token can read
+ * without needing Meta App Review, unlike arbitrary customer profile lookups above).
+ * Always resolves (never throws) — returns the URL string, or null on failure.
+ */
+async function fetchPageAvatar(pageAccessToken) {
+  try {
+    const url = `${GRAPH_BASE}/me/picture?type=large&redirect=false&access_token=${encodeURIComponent(pageAccessToken)}`;
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.data?.url) {
+      console.error('fetchPageAvatar failed:', JSON.stringify(data?.error || data));
+      return null;
+    }
+    return data.data.url;
+  } catch (e) {
+    console.error('fetchPageAvatar threw:', e.message);
+    return null;
+  }
+}
+
+/**
  * Pull a Page's conversation history from the Graph API Conversations endpoint
  * (Meta Business Inbox data — separate from the webhook, which only streams
  * NEW messages going forward). Returns messages no older than `sinceMs`.
@@ -124,4 +146,4 @@ async function fetchConversationHistory(pageAccessToken, sinceMs, { maxConversat
   return conversations;
 }
 
-module.exports = { sendTextMessage, sendAttachment, fetchUserProfile, fetchConversationHistory, GRAPH_BASE };
+module.exports = { sendTextMessage, sendAttachment, fetchUserProfile, fetchPageAvatar, fetchConversationHistory, GRAPH_BASE };
