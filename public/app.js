@@ -182,8 +182,9 @@ function renderRail() {
     rail.appendChild(el('div', { class: 'rail-empty' }, 'Chưa kết nối fanpage nào. Bấm ⚙ Cài đặt để thêm.'));
   }
   pages.forEach((p) => {
+    const marker = p.channel === 'website' ? '🌐' : `<span class="rail-dot" style="background:var(--fb)"></span>`;
     const item = el('div', { class: `rail-item ${String(activePageRowId) === String(p.id) ? 'active' : ''}` },
-      `<span class="rail-dot" style="background:var(--fb)"></span> ${escapeHtml(p.name)}`);
+      `${marker} ${escapeHtml(p.name)}`);
     item.addEventListener('click', () => { activePageRowId = p.id; renderRail(); loadConversations(); });
     rail.appendChild(item);
   });
@@ -234,7 +235,7 @@ function renderConvList() {
       <div class="avatar">${initials(c.customer_name)}</div>
       <div class="conv-body">
         <div class="conv-top">
-          <span class="conv-name">${escapeHtml(c.customer_name)}</span>
+          <span class="conv-name">${c.page && c.page.channel === 'website' ? '🌐 ' : ''}${escapeHtml(c.customer_name)}</span>
           <span class="conv-time">${formatTime(c.last_message_at)}</span>
         </div>
         <div class="conv-preview">${escapeHtml(c.last_message_preview)}</div>
@@ -280,6 +281,7 @@ $('#hamburgerBtn').addEventListener('click', () => {
 function renderThread(conv) {
   lastMsgCount = conv.messages.length;
   pendingAttachment = null;
+  const isWebsite = !!(conv.page && conv.page.channel === 'website');
   const panel = $('#threadPanel');
   panel.innerHTML = `
     <div class="thread-header">
@@ -287,7 +289,7 @@ function renderThread(conv) {
       <div class="avatar">${initials(conv.customer_name)}</div>
       <div class="thread-header-info">
         <h2>${escapeHtml(conv.customer_name)}</h2>
-        <div class="sub">${escapeHtml(conv.page ? conv.page.name : '')}</div>
+        <div class="sub">${isWebsite ? '🌐 Đặt lịch từ Website' : escapeHtml(conv.page ? conv.page.name : '')}</div>
       </div>
       <div class="thread-tags" id="threadTags"></div>
       <button class="icon-btn mobile-only" id="infoToggleBtn">ℹ</button>
@@ -304,6 +306,13 @@ function renderThread(conv) {
           </div>
         </div>`).join('')}
     </div>
+    ${isWebsite ? `
+    <div class="website-banner">
+      <div>🌐 Đây là lượt <b>đặt lịch từ Website</b> — không thể trả lời qua app này (không đi qua Facebook).</div>
+      ${conv.customer_phone
+        ? `<a class="tel-btn" href="tel:${escapeHtml(conv.customer_phone)}">📞 Gọi ${escapeHtml(conv.customer_phone)}</a>`
+        : `<span style="color:var(--text-muted);">Khách không để lại số điện thoại.</span>`}
+    </div>` : `
     <div class="composer">
       <div id="attachPreviewRow"></div>
       <div class="quick-chip-row" id="quickChipRow"></div>
@@ -314,13 +323,15 @@ function renderThread(conv) {
         <button class="send-btn" id="sendBtn">Gửi</button>
       </div>
       <div class="composer-note">Chỉ gửi được tin tự do trong vòng 24 giờ kể từ tin nhắn cuối của khách (chính sách Facebook). Ảnh/video tối đa 20MB.</div>
-    </div>`;
+    </div>`}`;
   renderThreadTags(conv);
-  renderQuickChips();
-  $('#sendBtn').addEventListener('click', () => sendMessage(conv.id));
-  $('#composerInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(conv.id); } });
-  $('#attachBtn').addEventListener('click', () => $('#fileInput').click());
-  $('#fileInput').addEventListener('change', (e) => handleFileSelected(e, conv.id));
+  if (!isWebsite) {
+    renderQuickChips();
+    $('#sendBtn').addEventListener('click', () => sendMessage(conv.id));
+    $('#composerInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(conv.id); } });
+    $('#attachBtn').addEventListener('click', () => $('#fileInput').click());
+    $('#fileInput').addEventListener('change', (e) => handleFileSelected(e, conv.id));
+  }
   const backBtn = $('#backToListBtn');
   if (backBtn) backBtn.addEventListener('click', showListOnMobile);
   const infoBtn = $('#infoToggleBtn');
@@ -445,10 +456,12 @@ async function sendMessage(convId) {
 
 /* ===================== Customer card + template sidebar ===================== */
 function renderCustomerCard(conv) {
+  const isWebsite = !!(conv.page && conv.page.channel === 'website');
   $('#customerCard').innerHTML = `
     <div class="cname">${escapeHtml(conv.customer_name)}</div>
-    <div class="crow"><span>Fanpage</span><span>${escapeHtml(conv.page ? conv.page.name : '')}</span></div>
-    <div class="crow"><span>PSID</span><span style="font-size:10px;">${escapeHtml(conv.customer_psid)}</span></div>
+    <div class="crow"><span>Nguồn</span><span>${isWebsite ? '🌐 Website' : escapeHtml(conv.page ? conv.page.name : '')}</span></div>
+    ${conv.customer_phone ? `<div class="crow"><span>Điện thoại</span><span><a href="tel:${escapeHtml(conv.customer_phone)}">${escapeHtml(conv.customer_phone)}</a></span></div>` : ''}
+    ${!isWebsite ? `<div class="crow"><span>PSID</span><span style="font-size:10px;">${escapeHtml(conv.customer_psid)}</span></div>` : ''}
   `;
 }
 
@@ -478,6 +491,8 @@ async function refreshSettings() {
   const info = await api('/api/webhook-info');
   $('#webhookUrlBox').textContent = `Webhook URL: ${info.webhook_url}`;
   $('#verifyTokenBox').textContent = `Verify Token: ${info.verify_token}`;
+  const webInfo = await api('/api/website-webhook-info');
+  $('#websiteWebhookUrlBox').textContent = `Webhook URL: ${webInfo.webhook_url}`;
   renderPagesAdmin();
   renderTagsAdmin();
   renderTemplatesAdmin();
@@ -486,8 +501,22 @@ async function refreshSettings() {
 function renderPagesAdmin() {
   const wrap = $('#pagesList');
   wrap.innerHTML = '';
-  pages.forEach((p) => {
-    const row = el('div', { class: 'list-row' }, `<span class="grow"><b>${escapeHtml(p.name)}</b> — Page ID: ${escapeHtml(p.page_id)} — Token: ${escapeHtml(p.access_token_masked)}</span><span class="del">Xoá</span>`);
+  pages.filter((p) => p.channel !== 'website').forEach((p) => {
+    const row = el('div', { class: 'list-row' }, `<span class="grow"><b>${escapeHtml(p.name)}</b> — Page ID: ${escapeHtml(p.page_id)} — Token: ${escapeHtml(p.access_token_masked)}</span><span class="sync-hist" style="cursor:pointer;color:var(--fb);margin-right:10px;">🔄 Đồng bộ 30 ngày</span><span class="del">Xoá</span>`);
+    row.querySelector('.sync-hist').addEventListener('click', async (e) => {
+      const label = e.target;
+      const original = label.textContent;
+      label.textContent = 'Đang đồng bộ…';
+      try {
+        const result = await api(`/api/pages/${p.id}/sync-history`, { method: 'POST', body: JSON.stringify({ days: 30 }) });
+        alert(`Đã đồng bộ ${result.conversations} hội thoại, ${result.messages_imported} tin nhắn từ 30 ngày qua.`);
+        loadConversations();
+      } catch (err) {
+        alert('Đồng bộ thất bại: ' + err.message);
+      } finally {
+        label.textContent = original;
+      }
+    });
     row.querySelector('.del').addEventListener('click', async () => {
       if (!confirm(`Xoá kết nối fanpage "${p.name}"?`)) return;
       await api(`/api/pages/${p.id}`, { method: 'DELETE' });
