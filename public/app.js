@@ -327,11 +327,15 @@ function renderThread(conv) {
   const nameHtml = fbLink
     ? `<a href="${fbLink}" target="_blank" rel="noopener" title="Mở đoạn chat này trên Facebook">${escapeHtml(conv.customer_name)}</a>`
     : escapeHtml(conv.customer_name);
+  const avatarHtml = `<div class="avatar"${threadAv.style}>${threadAv.text}</div>`;
+  const avatarBlock = fbLink
+    ? `<a class="avatar-link" href="${fbLink}" target="_blank" rel="noopener" title="Mở đoạn chat này trên Facebook">${avatarHtml}</a>`
+    : avatarHtml;
   const panel = $('#threadPanel');
   panel.innerHTML = `
     <div class="thread-header">
       <button class="icon-btn mobile-only back-btn" id="backToListBtn">← Danh sách</button>
-      <div class="avatar"${threadAv.style}>${threadAv.text}</div>
+      ${avatarBlock}
       <div class="thread-header-info">
         <h2>${nameHtml}</h2>
         <div class="sub">${isWebsite ? '🌐 Đặt lịch từ Website' : escapeHtml(conv.page ? conv.page.name : '')}</div>
