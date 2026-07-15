@@ -46,10 +46,26 @@ function pick(flat, keys) {
 
 const NAME_KEYS = ['your-name', 'your_name', 'name', 'full_name', 'fullname', 'ten', 'ho_ten', 'họ tên', 'họ và tên', 'field_1'];
 const PHONE_KEYS = ['your-phone', 'your_phone', 'phone', 'so_dien_thoai', 'sdt', 'số điện thoại', 'tel', 'field_2', 'phone_number'];
-const MESSAGE_KEYS = ['your-message', 'your_message', 'message', 'noi_dung', 'ghi_chu', 'nội dung', 'ghi chú', 'note', 'field_3'];
-// Metadata keys some plugins (like WP Webhooks) send alongside the real submitted fields —
-// noise we don't want cluttering the fallback dump shown to staff.
-const NOISE_PREFIXES = ['form_id', 'form_title', 'form_data_meta', 'form_submit_data', 'meta.'];
+const DATE_KEYS = ['appointment-date', 'appointment_date', 'ngay-hen', 'ngay_hen', 'ngày hẹn', 'date', 'field_3'];
+const SERVICE_KEYS = ['dich-vu', 'dich_vu', 'dịch vụ', 'service', 'field_4'];
+const MESSAGE_KEYS = ['your-message', 'your_message', 'message', 'noi_dung', 'ghi_chu', 'nội dung', 'ghi chú', 'note'];
+// Metadata some plugins (like WP Webhooks) send ALONGSIDE the real submitted fields — e.g. the raw
+// WordPress post object for the form itself (id/post_author/post_date/post_content/guid) and the
+// form's notification-email template (mail/mail_2), which still contains unresolved merge tags like
+// "[your-name]" rather than real values. None of this is data the customer actually typed — it's
+// noise we never want cluttering the message shown to staff, so it's excluded by key (last path
+// segment, case-insensitive) or by path prefix (for nested blocks like "mail.subject").
+const NOISE_KEYS = new Set([
+  'form_id', 'form_title', 'meta',
+  'id', 'post_author', 'post_date', 'post_date_gmt', 'post_title', 'post_name',
+  'post_type', 'post_status', 'post_content', 'post_excerpt', 'guid',
+  'locale', 'title', 'sent', 'invalid_fields', 'skip_mail', 'uploaded_data',
+  // Some WP Webhooks setups flatten the CF7 "mail" template's own fields to the TOP level
+  // (no "mail." prefix) — these are the notification-email settings, not submitted data.
+  'active', 'subject', 'sender', 'recipient', 'body', 'additional_headers',
+  'attachments', 'use_html', 'exclude_blank', 'mail_2',
+].map((k) => k.toLowerCase()));
+const NOISE_PATH_PREFIXES = ['form_data_meta', 'form_submit_data', 'meta.', 'form.', 'mail.', 'mail_2.'];
 
 router.post('/webhook/website-booking', (req, res) => {
   const token = req.query.token || req.get('x-webhook-token');
@@ -57,21 +73,36 @@ router.post('/webhook/website-booking', (req, res) => {
 
   const rawBody = req.body && typeof req.body === 'object' ? req.body : {};
   const flat = flatten(rawBody);
+  // Logged so we can see the exact shape WordPress/WP Webhooks actually sends, in case a form
+  // uses field names we don't recognize yet — check Render's Logs tab if a booking looks wrong.
+  console.log('website-booking payload:', JSON.stringify(rawBody));
 
   try {
     const name = pick(flat, NAME_KEYS) || 'Khách từ Website';
     const phone = pick(flat, PHONE_KEYS);
+    const date = pick(flat, DATE_KEYS);
+    const service = pick(flat, SERVICE_KEYS);
     let message = pick(flat, MESSAGE_KEYS);
 
-    // Nothing matched our known field names — fall back to dumping every field we got,
-    // so a form with unfamiliar field names still shows up with all its data instead of nothing.
-    // Prefer entries under "form_data." (the real submitted fields on WP Webhooks) when present,
-    // and always strip out known metadata noise either way.
+    // Build a clean message from the fields we recognize by name (date/service), instead of
+    // dumping the raw payload — avoids ever showing WordPress/email-template noise.
     if (!message) {
-      const known = new Set([...NAME_KEYS, ...PHONE_KEYS, ...MESSAGE_KEYS].map((k) => k.toLowerCase()));
+      const parts = [];
+      if (service) parts.push(`Dịch vụ cần tư vấn: ${service}`);
+      if (date) parts.push(`Ngày hẹn mong muốn: ${date}`);
+      message = parts.join('\n');
+    }
+
+    // Still nothing recognized at all — fall back to dumping whatever unfamiliar fields we got,
+    // so a form with field names we've never seen still shows up with its data instead of nothing.
+    // Prefer entries under "form_data." (the real submitted fields on WP Webhooks) when present,
+    // and always strip out known metadata/template noise either way.
+    if (!message) {
+      const known = new Set([...NAME_KEYS, ...PHONE_KEYS, ...DATE_KEYS, ...SERVICE_KEYS, ...MESSAGE_KEYS].map((k) => k.toLowerCase()));
       let entries = Object.entries(flat).filter(([path, v]) => {
         const lastSegment = path.split('.').pop().toLowerCase();
-        const isNoise = NOISE_PREFIXES.some((p) => path === p || path.startsWith(p));
+        const pathLower = path.toLowerCase();
+        const isNoise = NOISE_KEYS.has(lastSegment) || NOISE_PATH_PREFIXES.some((p) => pathLower === p.replace(/\.$/, '') || pathLower.startsWith(p));
         return !known.has(lastSegment) && !isNoise && String(v ?? '').trim() !== '';
       });
       const formDataOnly = entries.filter(([path]) => path.startsWith('form_data.'));
