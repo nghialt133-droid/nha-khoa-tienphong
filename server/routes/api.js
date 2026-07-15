@@ -1,3 +1,4 @@
+
 // routes/api.js — REST API used by the frontend dashboard
 const path = require('path');
 const crypto = require('crypto');
@@ -115,16 +116,20 @@ router.delete('/pages/:id', (req, res) => {
 async function syncPageHistory(page, days) {
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
-  // Upsert (not insert-or-ignore) so that re-running a sync also retroactively fixes messages
-  // imported by an older version of this endpoint — e.g. old/attachment-only messages that used
-  // to be stored as a "[Tệp đính kèm cũ]" placeholder now get the real image/video URL filled in.
-  const upsertMsg = db.prepare(`
-    INSERT INTO messages (conversation_id, direction, text, attachment_url, attachment_type, fb_message_id, created_at)
+  // IMPORTANT: this must be able to tell "genuinely new message" apart from "message we already
+  // had, re-fetched again this cycle" — the auto-sync re-pulls the same recent window every run,
+  // so it re-sees the same messages constantly. INSERT OR IGNORE reports changes=0 when a row
+  // already existed (unlike "INSERT ... ON CONFLICT DO UPDATE", which SQLite always counts as a
+  // change even when the new values are identical to the old ones — that bug caused unread_count
+  // to climb back up every single auto-sync cycle, even for conversations already marked read).
+  // A separate, narrower UPDATE below still retroactively repairs old attachment placeholders.
+  const insertMsg = db.prepare(`
+    INSERT OR IGNORE INTO messages (conversation_id, direction, text, attachment_url, attachment_type, fb_message_id, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(conversation_id, fb_message_id) DO UPDATE SET
-      text = excluded.text,
-      attachment_url = excluded.attachment_url,
-      attachment_type = excluded.attachment_type
+  `);
+  const repairAttachment = db.prepare(`
+    UPDATE messages SET text = ?, attachment_url = ?, attachment_type = ?
+    WHERE conversation_id = ? AND fb_message_id = ? AND attachment_url IS NULL
   `);
 
   let conversationsTouched = 0;
@@ -173,11 +178,17 @@ async function syncPageHistory(page, days) {
         text = '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]';
       }
       if (!text && !attachment_url) continue;
-      const info = upsertMsg.run(row.id, direction, text, attachment_url, attachment_type, m.id, m.created_time);
+      const info = insertMsg.run(row.id, direction, text, attachment_url, attachment_type, m.id, m.created_time);
       if (info.changes > 0) {
+        // Genuinely new message this run.
         messagesImported++;
         importedForThisConv++;
         if (direction === 'in') newInboundForThisConv++;
+      } else if (attachment_url) {
+        // Already had this message — but if it was previously stored as a placeholder
+        // (no attachment_url yet) and we now have a real one, fill it in. Doesn't count as
+        // "new" (no unread bump), and the WHERE clause makes this a no-op once already repaired.
+        repairAttachment.run(text, attachment_url, attachment_type, row.id, m.id);
       }
     }
 
