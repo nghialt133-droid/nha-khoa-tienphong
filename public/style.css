@@ -62,6 +62,7 @@ body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--
 .rail-item:hover{ background:var(--page-plane); }
 .rail-item.active{ background:var(--fb-tint); color:var(--text-primary); font-weight:600; }
 .rail-dot{ width:8px;height:8px;border-radius:50%; flex-shrink:0; }
+.rail-avatar{ width:18px;height:18px;border-radius:50%; flex-shrink:0; background-size:cover; background-position:center; background-color:var(--page-plane); }
 .rail-item .rail-count{ margin-left:auto; font-size:11px; color:var(--text-muted); background:var(--page-plane); border-radius:999px; padding:1px 7px; }
 .rail-empty{ font-size:12px; color:var(--text-muted); padding:8px; }
 

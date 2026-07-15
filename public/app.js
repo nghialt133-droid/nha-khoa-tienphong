@@ -191,7 +191,11 @@ function renderRail() {
     rail.appendChild(el('div', { class: 'rail-empty' }, 'Chưa kết nối fanpage nào. Bấm ⚙ Cài đặt để thêm.'));
   }
   pages.forEach((p) => {
-    const marker = p.channel === 'website' ? '🌐' : `<span class="rail-dot" style="background:var(--fb)"></span>`;
+    const marker = p.channel === 'website'
+      ? '🌐'
+      : (p.avatar_url
+          ? `<span class="rail-avatar" style="background-image:url('${escapeHtml(p.avatar_url)}')"></span>`
+          : `<span class="rail-dot" style="background:var(--fb)"></span>`);
     const item = el('div', { class: `rail-item ${String(activePageRowId) === String(p.id) ? 'active' : ''}` },
       `${marker} ${escapeHtml(p.name)}`);
     item.addEventListener('click', () => { activePageRowId = p.id; renderRail(); loadConversations(); });
