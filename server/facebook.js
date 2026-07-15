@@ -58,17 +58,21 @@ async function sendAttachment(pageAccessToken, psid, url, type) {
   return data;
 }
 
-/** Best-effort fetch of a customer's display name via their PSID. */
+/**
+ * Best-effort fetch of a customer's display name + Messenger profile picture via their PSID.
+ * Always resolves (never throws) — returns { name: string|null, avatarUrl: string|null } so
+ * callers can freely fall back to a generated placeholder name / initials avatar.
+ */
 async function fetchUserProfile(pageAccessToken, psid) {
   try {
-    const url = `${GRAPH_BASE}/${psid}?fields=first_name,last_name&access_token=${encodeURIComponent(pageAccessToken)}`;
+    const url = `${GRAPH_BASE}/${psid}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if (!res.ok) return { name: null, avatarUrl: null };
     const data = await res.json();
     const name = [data.first_name, data.last_name].filter(Boolean).join(' ');
-    return name || null;
+    return { name: name || null, avatarUrl: data.profile_pic || null };
   } catch {
-    return null;
+    return { name: null, avatarUrl: null };
   }
 }
 

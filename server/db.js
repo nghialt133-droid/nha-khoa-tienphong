@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   customer_psid TEXT NOT NULL,
   customer_name TEXT NOT NULL DEFAULT 'Khách hàng',
   customer_phone TEXT,
+  customer_avatar_url TEXT,
   last_message_preview TEXT NOT NULL DEFAULT '',
   last_message_at TEXT NOT NULL DEFAULT (datetime('now')),
   unread_count INTEGER NOT NULL DEFAULT 0,
@@ -93,6 +94,7 @@ const pageCols = db.prepare("PRAGMA table_info(pages)").all().map((c) => c.name)
 if (!pageCols.includes('channel')) db.exec("ALTER TABLE pages ADD COLUMN channel TEXT NOT NULL DEFAULT 'facebook'");
 const convCols = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
 if (!convCols.includes('customer_phone')) db.exec('ALTER TABLE conversations ADD COLUMN customer_phone TEXT');
+if (!convCols.includes('customer_avatar_url')) db.exec('ALTER TABLE conversations ADD COLUMN customer_avatar_url TEXT');
 
 // Seed a single virtual "page" that all website-form bookings attach to (not a real Facebook page,
 // so it has no access_token — just a container so bookings reuse the same conversations/messages tables).
