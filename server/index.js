@@ -37,3 +37,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.listen(PORT, () => {
   console.log(`Dental inbox app đang chạy tại http://localhost:${PORT}`);
 });
+
+// Automatically pull in new Facebook messages every minute — stands in for the live webhook
+// while it's blocked on Meta App Review (pages_messaging Advanced Access), see routes/api.js.
+apiRouter.startAutoSync(60 * 1000);
