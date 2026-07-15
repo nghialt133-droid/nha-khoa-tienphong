@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Hộp thư hợp nhất – Nha Khoa</title>
+<link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#2a78d6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Hộp thư NK">
+</head>
+<body>
+
+<div id="loginScreen">
+  <div class="login-card">
+    <h1>Hộp thư hợp nhất</h1>
+    <p>Đăng nhập bằng mật khẩu chung của team để xem tin nhắn từ các fanpage.</p>
+    <div class="login-error" id="loginError"></div>
+    <input type="password" id="loginPassword" placeholder="Mật khẩu">
+    <button id="loginBtn">Đăng nhập</button>
+  </div>
+</div>
+
+<div id="appRoot" class="app hidden">
+  <div class="topbar">
+    <div class="brand">
+      <button class="icon-btn mobile-only" id="hamburgerBtn">☰</button>
+      <div class="brand-mark">NK</div>
+      <div class="brand-text">
+        <h1>Hộp thư hợp nhất Fanpage</h1>
+        <span>Facebook Messenger — nhiều fanpage, gắn tag phân loại khách</span>
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">Hội thoại</div><div class="stat-value" id="statTotal">–</div></div>
+      <div class="stat-tile critical"><div class="stat-label">Chưa trả lời</div><div class="stat-value" id="statUnread">–</div></div>
+      <div class="stat-tile good"><div class="stat-label">Đã đặt hẹn</div><div class="stat-value" id="statBooked">–</div></div>
+      <button class="icon-btn" id="staffNameBtn">🧑‍⚕️ Bạn: —</button>
+      <button class="icon-btn" id="notifyBtn">🔔 Bật thông báo</button>
+      <button class="icon-btn" id="settingsBtn">⚙ Cài đặt</button>
+      <button class="icon-btn" id="logoutBtn">Đăng xuất</button>
+    </div>
+  </div>
+
+  <div class="main" id="mainArea">
+    <div class="channel-rail" id="channelRail"></div>
+    <div class="conv-list" id="convListPanel">
+      <div class="conv-search"><input type="text" id="searchInput" placeholder="Tìm khách hàng, nội dung..."></div>
+      <div class="conv-scroll" id="convScroll"></div>
+    </div>
+    <div class="thread" id="threadPanel">
+      <div class="empty-state">Chọn một hội thoại để bắt đầu</div>
+    </div>
+    <div class="side-panel" id="sidePanel">
+      <div class="panel-section">
+        <div class="panel-title">Thông tin khách hàng</div>
+        <div class="customer-card" id="customerCard">—</div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-title">Tin nhắn soạn sẵn</div>
+        <div id="templateList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<audio id="notifySound" preload="auto" src="data:audio/wav;base64,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"></audio>
+
+<div class="overlay hidden" id="settingsOverlay">
+  <div class="settings-panel">
+    <span class="close-x" id="closeSettings">✕</span>
+    <h2>Cài đặt</h2>
+
+    <div class="settings-block">
+      <h3>1. Thông tin Webhook (dán vào Meta App)</h3>
+      <div class="hint">Vào Meta App → Messenger → Settings → Webhooks, dán 2 giá trị dưới đây.</div>
+      <div class="readonly-box" id="webhookUrlBox">Đang tải…</div>
+      <div class="readonly-box" id="verifyTokenBox">Đang tải…</div>
+    </div>
+
+    <div class="settings-block">
+      <h3>2. Kết nối Fanpage (tối đa 5)</h3>
+      <div class="hint">Mỗi fanpage cần Page ID và Page Access Token lấy từ Meta App (xem hướng dẫn kèm theo).</div>
+      <div id="pagesList"></div>
+      <div class="field-row">
+        <input id="pgName" placeholder="Tên hiển thị (vd: Nha Khoa ABC - CN1)">
+        <input id="pgId" placeholder="Facebook Page ID">
+      </div>
+      <div class="field-row">
+        <input id="pgToken" placeholder="Page Access Token">
+        <button id="addPageBtn">+ Thêm fanpage</button>
+      </div>
+    </div>
+
+    <div class="settings-block">
+      <h3>3. Quản lý Tag phân loại khách</h3>
+      <div id="tagsList"></div>
+      <div class="field-row">
+        <input id="tagName" placeholder="Tên tag mới (vd: Cần gọi lại)">
+        <button id="addTagBtn">+ Thêm tag</button>
+      </div>
+      <div class="swatches" id="tagSwatches"></div>
+    </div>
+
+    <div class="settings-block">
+      <h3>4. Quản lý tin nhắn soạn sẵn</h3>
+      <div id="templatesAdmin"></div>
+      <div class="field-row">
+        <input id="newCatName" placeholder="Tên nhóm mới (vd: Ưu đãi)">
+        <button id="addCatBtn">+ Thêm nhóm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
