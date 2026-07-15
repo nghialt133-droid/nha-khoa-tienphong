@@ -102,10 +102,17 @@ router.post('/pages/:id/sync-history', async (req, res) => {
   const days = Math.min(Math.max(parseInt(req.body?.days, 10) || 30, 1), 365);
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
-  const insertMsg = db.prepare(
-    `INSERT OR IGNORE INTO messages (conversation_id, direction, text, fb_message_id, created_at)
-     VALUES (?, ?, ?, ?, ?)`
-  );
+  // Upsert (not insert-or-ignore) so that re-running a sync also retroactively fixes messages
+  // imported by an older version of this endpoint — e.g. old/attachment-only messages that used
+  // to be stored as a "[Tệp đính kèm cũ]" placeholder now get the real image/video URL filled in.
+  const upsertMsg = db.prepare(`
+    INSERT INTO messages (conversation_id, direction, text, attachment_url, attachment_type, fb_message_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(conversation_id, fb_message_id) DO UPDATE SET
+      text = excluded.text,
+      attachment_url = excluded.attachment_url,
+      attachment_type = excluded.attachment_type
+  `);
 
   let conversationsTouched = 0;
   let messagesImported = 0;
@@ -137,10 +144,23 @@ router.post('/pages/:id/sync-history', async (req, res) => {
       let importedForThisConv = 0;
       for (const m of msgs) {
         const direction = m.from?.id === page.page_id ? 'out' : 'in';
-        const hasAttachment = !!(m.attachments && (m.attachments.data || []).length);
-        const text = m.message || (hasAttachment ? '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]' : '');
-        if (!text) continue;
-        const info = insertMsg.run(row.id, direction, text, m.id, m.created_time);
+        const attachmentsData = m.attachments?.data || [];
+        const firstAtt = attachmentsData[0];
+        let attachment_url = null;
+        let attachment_type = null;
+        if (firstAtt && firstAtt.file_url) {
+          attachment_url = firstAtt.file_url;
+          const mime = firstAtt.mime_type || '';
+          attachment_type = mime.startsWith('image') ? 'image' : mime.startsWith('video') ? 'video' : 'file';
+        }
+        let text = m.message || '';
+        if (!text && !attachment_url && attachmentsData.length) {
+          // Had an attachment but Facebook didn't give us a usable URL for it (e.g. an
+          // unsupported/expired type) — keep a placeholder so the message isn't silently dropped.
+          text = '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]';
+        }
+        if (!text && !attachment_url) continue;
+        const info = upsertMsg.run(row.id, direction, text, attachment_url, attachment_type, m.id, m.created_time);
         if (info.changes > 0) { messagesImported++; importedForThisConv++; }
       }
 

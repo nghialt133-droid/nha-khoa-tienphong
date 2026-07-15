@@ -94,7 +94,7 @@ async function fetchConversationHistory(pageAccessToken, sinceMs, { maxConversat
   const conversations = [];
   let url =
     `${GRAPH_BASE}/me/conversations?fields=` +
-    encodeURIComponent('participants,updated_time,messages.limit(100){id,message,from,to,created_time,attachments}') +
+    encodeURIComponent('participants,updated_time,messages.limit(100){id,message,from,to,created_time,attachments{id,mime_type,name,file_url}}') +
     `&limit=25&access_token=${encodeURIComponent(pageAccessToken)}`;
 
   while (url && conversations.length < maxConversations) {
