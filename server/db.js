@@ -75,14 +75,6 @@ CREATE TABLE IF NOT EXISTS templates (
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  endpoint TEXT NOT NULL UNIQUE,
-  p256dh TEXT NOT NULL,
-  auth TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 CREATE INDEX IF NOT EXISTS idx_conv_page ON conversations(page_row_id);
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
 `);
@@ -103,24 +95,6 @@ if (!pageCols.includes('channel')) db.exec("ALTER TABLE pages ADD COLUMN channel
 const convCols = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
 if (!convCols.includes('customer_phone')) db.exec('ALTER TABLE conversations ADD COLUMN customer_phone TEXT');
 if (!convCols.includes('customer_avatar_url')) db.exec('ALTER TABLE conversations ADD COLUMN customer_avatar_url TEXT');
-
-// ---------- One-time fix: normalize messages.created_at values stored as raw Facebook ISO
-// timestamps ("2024-01-15T08:00:00+0000") by an older buggy history sync, instead of SQLite's
-// own "YYYY-MM-DD HH:MM:SS" UTC format used everywhere else. The mixed formats broke sorting and
-// display for messages imported via "Đồng bộ lịch sử" (self-heals any DB created before the fix).
-const badTimestampRows = db.prepare("SELECT id, created_at FROM messages WHERE created_at LIKE '%T%'").all();
-if (badTimestampRows.length) {
-  const fixTimestamp = db.prepare('UPDATE messages SET created_at = ? WHERE id = ?');
-  const fixAll = db.transaction((rows) => {
-    for (const r of rows) {
-      const d = new Date(r.created_at);
-      if (!isNaN(d.getTime())) {
-        fixTimestamp.run(d.toISOString().replace('T', ' ').replace(/\..+/, ''), r.id);
-      }
-    }
-  });
-  fixAll(badTimestampRows);
-}
 
 // Seed a single virtual "page" that all website-form bookings attach to (not a real Facebook page,
 // so it has no access_token — just a container so bookings reuse the same conversations/messages tables).

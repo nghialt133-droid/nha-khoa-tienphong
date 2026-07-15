@@ -2,7 +2,6 @@
 const express = require('express');
 const db = require('../db');
 const { fetchUserProfile } = require('../facebook');
-const { sendPushToAll } = require('../push');
 
 const router = express.Router();
 const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'change_this_verify_token';
@@ -86,13 +85,6 @@ async function handleIncomingMessage(page, psid, text, attachment_url, attachmen
   db.prepare(
     `INSERT INTO messages (conversation_id, direction, text, attachment_url, attachment_type) VALUES (?, 'in', ?, ?, ?)`
   ).run(conv.id, text, attachment_url, attachment_type);
-
-  // Push notification — reaches staff even if they've fully closed the browser/tab (the in-page
-  // Notification the frontend also shows only works while the tab is still open, even if hidden).
-  sendPushToAll({
-    title: `Tin nhắn mới từ ${conv.customer_name}`,
-    body: preview || 'Đã gửi tin nhắn',
-  }).catch(() => {});
 }
 
 module.exports = router;

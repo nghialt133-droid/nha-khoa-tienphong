@@ -67,11 +67,17 @@ async function fetchUserProfile(pageAccessToken, psid) {
   try {
     const url = `${GRAPH_BASE}/${psid}?fields=first_name,last_name,profile_pic&access_token=${encodeURIComponent(pageAccessToken)}`;
     const res = await fetch(url);
-    if (!res.ok) return { name: null, avatarUrl: null };
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Logged (not thrown) so a failed profile/avatar lookup never breaks messaging —
+      // but we can see *why* it failed in Render's Logs tab instead of guessing.
+      console.error(`fetchUserProfile failed for psid ${psid}:`, JSON.stringify(data?.error || data));
+      return { name: null, avatarUrl: null };
+    }
     const name = [data.first_name, data.last_name].filter(Boolean).join(' ');
     return { name: name || null, avatarUrl: data.profile_pic || null };
-  } catch {
+  } catch (e) {
+    console.error(`fetchUserProfile threw for psid ${psid}:`, e.message);
     return { name: null, avatarUrl: null };
   }
 }
@@ -88,7 +94,7 @@ async function fetchConversationHistory(pageAccessToken, sinceMs, { maxConversat
   const conversations = [];
   let url =
     `${GRAPH_BASE}/me/conversations?fields=` +
-    encodeURIComponent('participants,updated_time,messages.limit(100){id,message,from,to,created_time,attachments{mime_type,file_url}}') +
+    encodeURIComponent('participants,updated_time,messages.limit(100){id,message,from,to,created_time,attachments}') +
     `&limit=25&access_token=${encodeURIComponent(pageAccessToken)}`;
 
   while (url && conversations.length < maxConversations) {

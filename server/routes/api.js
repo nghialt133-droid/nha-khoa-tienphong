@@ -5,7 +5,6 @@ const express = require('express');
 const multer = require('multer');
 const db = require('../db');
 const { sendTextMessage, sendAttachment, fetchConversationHistory, fetchUserProfile } = require('../facebook');
-const { publicKey: PUSH_PUBLIC_KEY, enabled: pushEnabled } = require('../push');
 
 const router = express.Router();
 
@@ -103,17 +102,9 @@ router.post('/pages/:id/sync-history', async (req, res) => {
   const days = Math.min(Math.max(parseInt(req.body?.days, 10) || 30, 1), 365);
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
-  // Upsert (not plain INSERT OR IGNORE) so that re-running "Đồng bộ lịch sử" also repairs
-  // messages that were already imported by an older, buggier version of this sync — e.g. rows
-  // that got stuck with the old "[Tệp đính kèm cũ...]" placeholder text and no real image/video.
   const insertMsg = db.prepare(
-    `INSERT INTO messages (conversation_id, direction, text, fb_message_id, created_at, attachment_url, attachment_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(conversation_id, fb_message_id) DO UPDATE SET
-       text = excluded.text,
-       created_at = excluded.created_at,
-       attachment_url = excluded.attachment_url,
-       attachment_type = excluded.attachment_type`
+    `INSERT OR IGNORE INTO messages (conversation_id, direction, text, fb_message_id, created_at)
+     VALUES (?, ?, ?, ?, ?)`
   );
 
   let conversationsTouched = 0;
@@ -141,41 +132,14 @@ router.post('/pages/:id/sync-history', async (req, res) => {
           .run(page.id, psid, customerName);
         row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
       }
-      // Conversations pulled in bulk here never got a Facebook avatar before (only the webhook
-      // and the "open a conversation" endpoint fetched one) — that's why avatars only ever
-      // appeared for brand-new incoming messages, never for history synced in this way.
-      if (!row.customer_avatar_url) {
-        try {
-          const profile = await fetchUserProfile(page.access_token, psid);
-          if (profile.avatarUrl) {
-            db.prepare('UPDATE conversations SET customer_avatar_url = ? WHERE id = ?').run(profile.avatarUrl, row.id);
-          }
-        } catch { /* best-effort — avatar just falls back to initials */ }
-      }
 
       let importedForThisConv = 0;
       for (const m of msgs) {
         const direction = m.from?.id === page.page_id ? 'out' : 'in';
-        // The Graph API's message.attachments edge returns { mime_type, file_url } — no
-        // separate "type" field like the webhook gets — so the type is derived from the MIME
-        // type. Previously this was discarded entirely and replaced with a placeholder string
-        // telling staff to go look on Facebook instead; now the real image/video is stored and
-        // rendered inline just like live messages.
-        const att = (m.attachments && (m.attachments.data || [])[0]) || null;
-        let attachment_url = null;
-        let attachment_type = null;
-        if (att && att.file_url) {
-          attachment_url = att.file_url;
-          attachment_type = /^image\//.test(att.mime_type || '') ? 'image' : /^video\//.test(att.mime_type || '') ? 'video' : 'file';
-        }
-        const text = m.message || '';
-        if (!text && !attachment_url) continue;
-        // Normalize Facebook's "2024-01-15T08:00:00+0000" timestamp to the same
-        // "YYYY-MM-DD HH:MM:SS" (UTC) format SQLite's own datetime('now') produces elsewhere.
-        // Mixing the two formats in the same column was why imported messages showed the
-        // wrong time and sorted out of order next to live webhook messages.
-        const createdAt = new Date(m.created_time).toISOString().replace('T', ' ').replace(/\..+/, '');
-        const info = insertMsg.run(row.id, direction, text, m.id, createdAt, attachment_url, attachment_type);
+        const hasAttachment = !!(m.attachments && (m.attachments.data || []).length);
+        const text = m.message || (hasAttachment ? '[Tệp đính kèm cũ — xem trực tiếp trên Facebook]' : '');
+        if (!text) continue;
+        const info = insertMsg.run(row.id, direction, text, m.id, m.created_time);
         if (info.changes > 0) { messagesImported++; importedForThisConv++; }
       }
 
@@ -195,6 +159,38 @@ router.post('/pages/:id/sync-history', async (req, res) => {
     console.error('sync-history error', e);
     res.status(500).json({ error: e.message || 'Đồng bộ lịch sử thất bại' });
   }
+});
+
+/**
+ * Backfill the real Facebook avatar for every conversation on this page that doesn't have one
+ * yet — covers conversations imported via sync-history (or created before the avatar feature
+ * existed), which otherwise only get an avatar the first time a staff member happens to open them.
+ * Calls are made one at a time (not in parallel) to stay well under Graph API rate limits.
+ */
+router.post('/pages/:id/sync-avatars', async (req, res) => {
+  const page = db.prepare('SELECT * FROM pages WHERE id = ?').get(req.params.id);
+  if (!page) return res.status(404).json({ error: 'Không tìm thấy fanpage' });
+  if (page.channel === 'website') return res.status(400).json({ error: 'Fanpage Website không có avatar Facebook' });
+
+  const rows = db.prepare('SELECT id, customer_psid FROM conversations WHERE page_row_id = ? AND customer_avatar_url IS NULL').all(page.id);
+
+  let updated = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      const profile = await fetchUserProfile(page.access_token, row.customer_psid);
+      if (profile.avatarUrl) {
+        db.prepare('UPDATE conversations SET customer_avatar_url = ? WHERE id = ?').run(profile.avatarUrl, row.id);
+        updated++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+  }
+
+  res.json({ ok: true, checked: rows.length, updated, failed });
 });
 
 router.get('/webhook-info', (req, res) => {
@@ -250,10 +246,7 @@ router.get('/conversations/:id', async (req, res) => {
     }
   }
 
-  // Order by actual message time (not insertion id) — otherwise messages imported later via
-  // "Đồng bộ lịch sử" (which can have an old created_at but a newer autoincrement id) show up
-  // out of chronological order relative to messages that arrived live via the webhook.
-  const messages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC').all(conv.id);
+  const messages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC').all(conv.id);
   res.json({ ...serializeConversation(conv), messages });
 });
 
@@ -367,27 +360,6 @@ router.put('/templates/:id', (req, res) => {
 
 router.delete('/templates/:id', (req, res) => {
   db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
-  res.json({ ok: true });
-});
-
-/* ================= PUSH NOTIFICATIONS (báo khi tắt màn hình / đóng hẳn trình duyệt) ================= */
-router.get('/push/public-key', (req, res) => {
-  res.json({ publicKey: PUSH_PUBLIC_KEY, enabled: pushEnabled });
-});
-
-router.post('/push/subscribe', (req, res) => {
-  const { endpoint, keys } = req.body || {};
-  if (!endpoint || !keys?.p256dh || !keys?.auth) return res.status(400).json({ error: 'Thiếu thông tin đăng ký thông báo' });
-  db.prepare(
-    `INSERT INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?)
-     ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth`
-  ).run(endpoint, keys.p256dh, keys.auth);
-  res.json({ ok: true });
-});
-
-router.post('/push/unsubscribe', (req, res) => {
-  const { endpoint } = req.body || {};
-  if (endpoint) db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
   res.json({ ok: true });
 });
 
