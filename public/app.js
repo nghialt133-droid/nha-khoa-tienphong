@@ -59,8 +59,45 @@ $('#notifyBtn').addEventListener('click', async () => {
   if (!('Notification' in window)) return alert('Trình duyệt này không hỗ trợ thông báo trên màn hình.');
   const perm = await Notification.requestPermission();
   $('#notifyBtn').textContent = perm === 'granted' ? '🔔 Đã bật thông báo' : '🔔 Bật thông báo';
-  if (perm === 'granted') new Notification('Đã bật thông báo', { body: 'Bạn sẽ được báo khi có tin nhắn mới.' });
+  if (perm === 'granted') {
+    new Notification('Đã bật thông báo', { body: 'Bạn sẽ được báo khi có tin nhắn mới, kể cả khi tắt màn hình hoặc đóng trình duyệt.' });
+    subscribeToPush();
+  }
 });
+
+/** Turn "-"/"_" base64url (what the server sends) into the raw Uint8Array PushManager expects. */
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+}
+
+/**
+ * Register the service worker + subscribe to Web Push so staff get notified about new messages
+ * even with the browser fully closed (the in-page Notification() above only fires while the tab
+ * is still open, even if it's just sitting in the background). Silently does nothing on browsers
+ * that don't support it (e.g. older Safari) or if the server hasn't configured VAPID keys yet —
+ * the in-tab notification still works either way.
+ */
+async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    const { publicKey, enabled } = await api('/api/push/public-key');
+    if (!enabled || !publicKey) return;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+    }
+    await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub.toJSON()) });
+  } catch (e) {
+    console.warn('Không đăng ký được thông báo khi tắt màn hình:', e);
+  }
+}
 function notifyNewMessages(namesList) {
   const sound = $('#notifySound');
   if (sound) sound.play().catch(() => {});
@@ -89,6 +126,13 @@ async function showApp() {
   const savedName = getStaffName();
   if (savedName) $('#staffNameBtn').textContent = `🧑‍⚕️ Bạn: ${savedName}`;
   else setTimeout(() => promptStaffName(false), 300);
+  // If notifications were already granted in a previous visit, silently (re-)subscribe to push —
+  // browsers occasionally invalidate a subscription, and this keeps it fresh without making
+  // staff click "🔔 Bật thông báo" again every time they open the app.
+  if ('Notification' in window && Notification.permission === 'granted') {
+    $('#notifyBtn').textContent = '🔔 Đã bật thông báo';
+    subscribeToPush();
+  }
   await loadAll();
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(pollTick, 8000);
@@ -261,7 +305,12 @@ function renderConvList() {
 
 function formatTime(iso) {
   if (!iso) return '';
-  const d = new Date(iso.replace(' ', 'T') + 'Z');
+  // Timestamps are stored as UTC "YYYY-MM-DD HH:MM:SS" (no timezone marker), so treat them as
+  // UTC explicitly. Guard against any string that already carries its own timezone (e.g. "Z" or
+  // a "+HH:MM"/"+HHMM" offset) so we never double-append "Z" and end up with an invalid date.
+  const hasTimezone = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso.trim());
+  const normalized = hasTimezone ? iso.replace(' ', 'T') : `${iso.replace(' ', 'T')}Z`;
+  const d = new Date(normalized);
   if (isNaN(d.getTime())) return iso;
   const now = new Date();
   const sameDay = d.toDateString() === now.toDateString();
